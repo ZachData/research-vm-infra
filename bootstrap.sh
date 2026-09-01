@@ -19,6 +19,55 @@ INSTANCE_ID="$(rvm_instance_id || echo unknown)"
 
 rvm_log "bootstrap: project=${PROJECT_ARG} role=${ROLE} instance=${INSTANCE_ID}"
 
+# --- 0. runtime cap, FIRST ---
+# Before anything that can fail. This script runs under `set -e`, so a bad
+# clone or a failed env build aborts it; if the cap were set at the end,
+# that abort would leave an instance running with nothing scheduled to
+# stop it. The default hard-cap hours are used here because the project's
+# own config has not been read yet — a cap that is slightly wrong beats a
+# cap that never gets set.
+apt-get install -y at >/dev/null 2>&1 || true
+systemctl enable --now atd >/dev/null 2>&1 || true
+CAP_JOB="$(echo "aws ec2 stop-instances --region ${RVM_REGION} --instance-ids ${INSTANCE_ID}" \
+  | at now + "${RVM_BOOT_CAP_HOURS:-4}" hours 2>&1 | grep -o 'job [0-9]*' | awk '{print $2}' || true)"
+echo "${CAP_JOB}" > /run/rvm-hardcap-job
+rvm_log "hard cap set (job ${CAP_JOB}, ${RVM_BOOT_CAP_HOURS:-4}h)"
+
+# --- 0b. boot receipt ---
+# An unattended instance has no other way to say what happened. Every exit
+# path, success or failure, leaves a receipt in S3 with the status and the
+# tail of the boot log, so a fleet can be debugged without shell access to
+# a machine that may already be gone.
+RVM_T0="$(date +%s)"
+rvm_receipt() {
+  local status="$1"
+  local key="boot-receipts/${RVM_PROJECT:-unknown}/$(date -u +%Y%m%dT%H%M%SZ)-${INSTANCE_ID}-${status}.json"
+  local elapsed=$(( $(date +%s) - RVM_T0 ))
+  python3 - "${status}" "${elapsed}" > /tmp/rvm-receipt.json <<'PYR' || return 0
+import json, subprocess, sys, os
+tail = ""
+try:
+    tail = subprocess.run(["tail","-c","4000","/var/log/rvm-boot.log"],
+                          capture_output=True, text=True).stdout
+except Exception:
+    pass
+json.dump({
+    "status": sys.argv[1],
+    "seconds": int(sys.argv[2]),
+    "instance": os.environ.get("INSTANCE_ID",""),
+    "project": os.environ.get("RVM_PROJECT",""),
+    "role": os.environ.get("ROLE",""),
+    "python": os.environ.get("RVM_PYTHON",""),
+    "env_hash": os.environ.get("RVM_ENV_HASH",""),
+    "log_tail": tail,
+}, sys.stdout, indent=2)
+PYR
+  aws s3 cp /tmp/rvm-receipt.json "s3://${RVM_BUCKET}/${key}" \
+    --region "${RVM_REGION}" --only-show-errors || true
+}
+export INSTANCE_ID ROLE
+trap 'rvm_receipt failed' ERR
+
 # --- 1. git auth (PAT, works for every repo the token can see) ---
 rvm_setup_git_auth
 
@@ -92,20 +141,16 @@ BASHRC
 chown "${RVM_TARGET_USER}:${RVM_TARGET_USER}" "${RVM_TARGET_HOME}/.bashrc"
 fi
 
-# --- 6. runtime caps ---
-apt-get install -y at >/dev/null 2>&1 || true
-systemctl enable --now atd >/dev/null 2>&1 || true
-
-if [ "${ROLE}" = "worker" ]; then
-  HOURS="${RVM_WORKER_HOURS}"
-else
-  HOURS="${RVM_HARD_CAP_HOURS}"
+# The boot cap in step 0 used the built-in default, since no project config
+# had been read yet. Now that one has, replace it with the project's value.
+if [ "${ROLE}" = "worker" ]; then HOURS="${RVM_WORKER_HOURS}"; else HOURS="${RVM_HARD_CAP_HOURS}"; fi
+if [ "${HOURS}" != "${RVM_BOOT_CAP_HOURS:-4}" ]; then
+  atrm "$(cat /run/rvm-hardcap-job)" 2>/dev/null || true
+  CAP_JOB="$(echo "aws ec2 stop-instances --region ${RVM_REGION} --instance-ids ${INSTANCE_ID}" \
+    | at now + "${HOURS}" hours 2>&1 | grep -o 'job [0-9]*' | awk '{print $2}' || true)"
+  echo "${CAP_JOB}" > /run/rvm-hardcap-job
+  rvm_log "hard cap reset to ${HOURS}h (job ${CAP_JOB})"
 fi
-# Stop, never terminate, on the cap: a capped instance is one you want to
-# look at. Job id is handed to the worker so a clean finish can cancel it.
-CAP_JOB="$(echo "aws ec2 stop-instances --region ${RVM_REGION} --instance-ids ${INSTANCE_ID}" \
-  | at now + "${HOURS}" hours 2>&1 | grep -o 'job [0-9]*' | awk '{print $2}' || true)"
-echo "${CAP_JOB}" > /run/rvm-hardcap-job
 
 if [ "${ROLE}" != "worker" ]; then
   aws cloudwatch put-metric-alarm --region "${RVM_REGION}" \
@@ -119,7 +164,11 @@ if [ "${ROLE}" != "worker" ]; then
     --treat-missing-data notBreaching || rvm_log "idle alarm not set (permissions?)"
 fi
 
-rvm_log "bootstrap complete: ${RVM_PROJECT} @ ${RVM_REPO_DIR} (${ROLE})"
+RVM_ENV_HASH="$(cat "${RVM_VENV}/.rvm-env-hash" 2>/dev/null || echo unknown)"
+export RVM_ENV_HASH RVM_PROJECT RVM_PYTHON
+rvm_receipt ok
+trap - ERR
+rvm_log "bootstrap complete in $(( $(date +%s) - RVM_T0 ))s: ${RVM_PROJECT} @ ${RVM_REPO_DIR} (${ROLE})"
 
 # --- 7. hand off ---
 if [ "${ROLE}" = "worker" ]; then
