@@ -10,7 +10,23 @@ RVM_INFRA_DIR="${RVM_INFRA_DIR:-/opt/rvm/infra}"
 RVM_PAT_PARAM="${RVM_PAT_PARAM:-/research-vm/github-pat}"
 RVM_TARGET_USER="${RVM_TARGET_USER:-ubuntu}"
 RVM_TARGET_HOME="${RVM_TARGET_HOME:-/home/${RVM_TARGET_USER}}"
-RVM_VENV="${RVM_VENV:-${RVM_TARGET_HOME}/venv}"
+# One venv per project, under a common root. The daemon serves several
+# projects from one long-lived box, and a single shared venv path meant
+# every project switch evicted the previous project's environment. A venv
+# is not relocatable, so the path must be deterministic per project rather
+# than merely unique: ${RVM_VENV_ROOT}/<project> is the same path on every
+# machine, which keeps the S3 tarballs valid. ~1.5 GB each against 50 GB
+# free is ~30 projects.
+RVM_VENV_ROOT="${RVM_VENV_ROOT:-${RVM_TARGET_HOME}/venvs}"
+RVM_VENV_OVERRIDE="${RVM_VENV:-}"
+RVM_VENV="${RVM_VENV:-${RVM_VENV_ROOT}/default}"
+
+# Daemon state. Kept on local disk, not in S3: the box outlives every
+# individual run now, so S3 is the backup channel rather than the hot path.
+RVM_STATE_DIR="${RVM_STATE_DIR:-/run/rvm}"
+RVM_HEARTBEAT="${RVM_HEARTBEAT:-${RVM_STATE_DIR}/heartbeat}"
+# Polled each loop so a daemon can be paused or stopped without SSH.
+RVM_CONTROL_PARAM="${RVM_CONTROL_PARAM:-/research-vm/daemon-control}"
 RVM_DEFAULT_OWNER="${RVM_DEFAULT_OWNER:-ZachData}"
 # Default interpreter for a project that does not pin one. uv fetches
 # whatever a project asks for at boot, so a project on 3.11 or 3.13 costs
@@ -122,11 +138,18 @@ rvm_load_project() {
   RVM_ENV_FILES="pyproject.toml requirements.txt uv.lock poetry.lock setup.py"
   RVM_HARD_CAP_HOURS=4
   RVM_WORKER_HOURS=3
+  # Daemon lifetime. The lease is short and renewed while the daemon is
+  # provably alive; the ceiling is set once and never renewed, so even a
+  # daemon spinning on a wedged loop dies on schedule. C5 keeps its teeth.
+  RVM_LEASE_MINUTES=90
+  RVM_MAX_LIFETIME_HOURS=168
+  RVM_DAEMON_POLL_SECONDS=300
   RVM_TEST_CMD=""
   RVM_WORKER_CMD=""
   RVM_PROMPT_FILE="infra/prompt.md"
   RVM_CACHE_PATHS=""
   RVM_CI_GATE=1
+  RVM_VENV="${RVM_VENV_OVERRIDE:-${RVM_VENV_ROOT}/${name}}"
 
   [ -f "${RVM_INFRA_DIR}/projects/${name}.env" ] && . "${RVM_INFRA_DIR}/projects/${name}.env"
   [ -f "${repo_dir}/infra/rvm.env" ] && . "${repo_dir}/infra/rvm.env"

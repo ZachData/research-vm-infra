@@ -17,7 +17,8 @@
 rvm_env_hash() {
   local repo_dir="$1" f
   {
-    echo "v2"
+    echo "v3"
+    echo "venv=$(basename "${RVM_VENV}")"
     echo "arch=$(rvm_arch)"
     echo "py=${RVM_PYTHON}"
     echo "gpu=$(rvm_has_gpu && echo 1 || echo 0)"
@@ -75,14 +76,21 @@ rvm_env_restore() {
        | tar -I 'zstd -d' -x -C "${tmp}"; then
     rm -rf "${tmp}"; return 1
   fi
+  local src
+  # The archive's top-level entry is named for the venv it was built from,
+  # which is per-project now. Take whatever came out rather than assuming.
+  src="$(find "${tmp}" -mindepth 1 -maxdepth 1 -type d | head -1)"
+  [ -n "${src}" ] || { rm -rf "${tmp}"; rvm_log "empty archive"; return 1; }
+  mkdir -p "$(dirname "${RVM_VENV}")"
   rm -rf "${RVM_VENV}.old"
   [ -d "${RVM_VENV}" ] && mv "${RVM_VENV}" "${RVM_VENV}.old"
-  mv "${tmp}/venv" "${RVM_VENV}"
+  mv "${src}" "${RVM_VENV}"
   rm -rf "${tmp}" "${RVM_VENV}.old"
   echo "${hash}" > "${RVM_VENV}/.rvm-env-hash"
   # A venv is not relocatable: its scripts carry absolute shebangs. The
-  # tarball is therefore only valid when extracted to the same path it was
-  # built at, which is why RVM_VENV is fixed rather than per-project.
+  # tarball is only valid extracted to the path it was built at, so the
+  # venv path is part of the cache key and derived deterministically from
+  # the project name. This check is what catches a violation of that.
   "${RVM_VENV}/bin/python" -c 'import sys; sys.exit(0)' \
     || { rvm_log "restored venv is not executable"; return 1; }
   return 0
@@ -91,6 +99,7 @@ rvm_env_restore() {
 rvm_env_build() {
   local repo_dir="$1" hash="$2" f
   rvm_log "building venv at ${RVM_VENV} for python ${RVM_PYTHON} (slow path)"
+  mkdir -p "$(dirname "${RVM_VENV}")"
   rm -rf "${RVM_VENV}"
   if command -v uv >/dev/null 2>&1; then
     # uv downloads the requested CPython if the box does not have it, which
