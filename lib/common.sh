@@ -12,6 +12,10 @@ RVM_TARGET_USER="${RVM_TARGET_USER:-ubuntu}"
 RVM_TARGET_HOME="${RVM_TARGET_HOME:-/home/${RVM_TARGET_USER}}"
 RVM_VENV="${RVM_VENV:-${RVM_TARGET_HOME}/venv}"
 RVM_DEFAULT_OWNER="${RVM_DEFAULT_OWNER:-ZachData}"
+# Default interpreter for a project that does not pin one. uv fetches
+# whatever a project asks for at boot, so a project on 3.11 or 3.13 costs
+# a download, not an AMI.
+RVM_PYTHON_DEFAULT="${RVM_PYTHON_DEFAULT:-3.12}"
 
 rvm_log() { printf '[rvm %s] %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
 rvm_die() { rvm_log "FATAL: $*"; exit 1; }
@@ -29,6 +33,11 @@ rvm_instance_id() { rvm_imds instance-id; }
 # arm64 / x86_64 — part of the env-cache key, since a venv with compiled
 # wheels is not portable across architectures.
 rvm_arch() { uname -m; }
+
+# No GPU means torch's default PyPI wheel drags in ~3 GB of CUDA libraries
+# that can never execute. Part of the env-cache key, so a GPU instance and
+# a CPU instance never share an environment.
+rvm_has_gpu() { [ -e /dev/nvidia0 ] || command -v nvidia-smi >/dev/null 2>&1; }
 
 # "3.12" — also part of the key: a venv built for one minor version does
 # not work under another.
@@ -65,6 +74,32 @@ rvm_setup_git_auth() {
     su - "${user}" -c "printf '%s' '${pat}' | gh auth login --with-token" || true
 }
 
+# Claude Code keys per-project state by an encoded form of the repo path:
+# /home/ubuntu/Lora_inductionhead -> -home-ubuntu-Lora-inductionhead
+# (slashes and underscores both become dashes).
+rvm_claude_dir() {
+  local enc; enc="$(echo "${1}" | tr '/_' '--')"
+  echo "${RVM_TARGET_HOME}/.claude/projects/${enc}"
+}
+
+# Agent memory is the one piece of instance state with no copy anywhere
+# else: the repo is on GitHub and the venv is in the cache, but memory
+# written during a run dies with the volume unless it is synced. An
+# ephemeral fleet that forgets everything each terminate is worse than a
+# long-lived box, so this makes memory outlive the instance.
+rvm_memory_pull() {
+  local dir; dir="$(rvm_claude_dir "$1")/memory"
+  mkdir -p "${dir}"
+  aws s3 sync "s3://${RVM_BUCKET}/memory/${RVM_PROJECT}/" "${dir}/" \
+    --region "${RVM_REGION}" --only-show-errors || true
+}
+rvm_memory_push() {
+  local dir; dir="$(rvm_claude_dir "$1")/memory"
+  [ -d "${dir}" ] || return 0
+  aws s3 sync "${dir}/" "s3://${RVM_BUCKET}/memory/${RVM_PROJECT}/" \
+    --region "${RVM_REGION}" --only-show-errors || true
+}
+
 # Load a project's config. Precedence, lowest to highest:
 #   built-in defaults  <  infra repo projects/<name>.env  <  repo infra/rvm.env
 # The repo file wins so a project can change its own runtime without a
@@ -82,6 +117,7 @@ rvm_load_project() {
   RVM_INSTANCE_TYPE="t4g.small"
   RVM_ORCH_TEMPLATE="small_t4g_template"
   RVM_WORKER_TEMPLATE="research-vm-worker-template"
+  RVM_PYTHON="${RVM_PYTHON_DEFAULT}"
   RVM_ENV_INSTALL="pip install -e '.[dev]'"
   RVM_ENV_FILES="pyproject.toml requirements.txt uv.lock poetry.lock setup.py"
   RVM_HARD_CAP_HOURS=4

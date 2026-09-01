@@ -17,8 +17,32 @@ rvm_load_project "${PROJECT_ARG}"
 INSTANCE_ID="$(rvm_instance_id || echo unknown)"
 BRANCH="$(su - "${RVM_TARGET_USER}" -c "cd '${RVM_REPO_DIR}' && git rev-parse --abbrev-ref HEAD")"
 
-[ -n "${RVM_WORKER_CMD}" ] || rvm_die "RVM_WORKER_CMD unset in ${RVM_REPO_DIR}/infra/rvm.env"
-CMD="${RVM_WORKER_CMD//\{worker_id\}/${WORKER_ID}}"
+# What this cell runs, in precedence order:
+#   1. a per-worker "cmd" in sweep_manifest.json — lets the agent that wrote
+#      the manifest pick the command, which differs from sweep to sweep
+#   2. RVM_WORKER_CMD from infra/rvm.env, with {worker_id} and {n_workers}
+#      substituted, for projects whose sweeps always take the same shape
+MANIFEST="${RVM_REPO_DIR}/sweep_manifest.json"
+CMD=""
+N_WORKERS=1
+if [ -f "${MANIFEST}" ]; then
+  MANIFEST_LINE="$(python3 - "${MANIFEST}" "${WORKER_ID}" <<'JSONQ'
+import json, sys
+ws = json.load(open(sys.argv[1]))["workers"]
+me = next((w for w in ws if str(w["worker_id"]) == sys.argv[2]), {})
+print(len(ws), me.get("cmd", ""))
+JSONQ
+)"
+  N_WORKERS="${MANIFEST_LINE%% *}"
+  CMD="${MANIFEST_LINE#* }"
+fi
+if [ -z "${CMD}" ]; then
+  [ -n "${RVM_WORKER_CMD}" ] || rvm_die "no cmd in sweep_manifest.json and RVM_WORKER_CMD unset in ${RVM_REPO_DIR}/infra/rvm.env"
+  CMD="${RVM_WORKER_CMD}"
+fi
+CMD="${CMD//\{worker_id\}/${WORKER_ID}}"
+CMD="${CMD//\{n_workers\}/${N_WORKERS}}"
+rvm_log "cell command: ${CMD}"
 
 set +e
 su - "${RVM_TARGET_USER}" -c "cd '${RVM_REPO_DIR}' \

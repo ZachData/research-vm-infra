@@ -57,6 +57,10 @@ for spec in ${RVM_CACHE_PATHS}; do
   chown -R "${RVM_TARGET_USER}:${RVM_TARGET_USER}" "${dest}" || true
 done
 
+# --- 4b. agent memory from the last instance that worked this project ---
+rvm_memory_pull "${RVM_REPO_DIR}"
+chown -R "${RVM_TARGET_USER}:${RVM_TARGET_USER}" "${RVM_TARGET_HOME}/.claude" 2>/dev/null || true
+
 # --- 5. record what this instance is, for interactive sessions ---
 cat > "${RVM_TARGET_HOME}/.rvm-current" <<EOF
 RVM_PROJECT=${RVM_PROJECT}

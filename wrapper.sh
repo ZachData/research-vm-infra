@@ -31,7 +31,7 @@ BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 
 # The venv came from a cache keyed on this commit's dependency files, so
 # it is already correct — but a `git pull` since boot can move them.
-rvm_env_ensure "${RVM_REPO_DIR}" python3
+rvm_env_ensure "${RVM_REPO_DIR}"
 
 # --- 1. run the agent on the next row ---
 PROMPT_PATH="${RVM_REPO_DIR}/${RVM_PROMPT_FILE}"

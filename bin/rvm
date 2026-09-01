@@ -90,11 +90,12 @@ cmd_env() {
     status)
       echo "project : ${RVM_PROJECT}"
       echo "repo    : ${dir}"
+      echo "python  : ${RVM_PYTHON}"
       echo "hash    : ${h}"
       echo "key     : s3://${RVM_BUCKET}/${k}"
       echo -n "cached  : "; rvm_env_exists "${k}" && echo yes || echo no
       echo -n "local   : "; cat "${RVM_VENV}/.rvm-env-hash" 2>/dev/null || echo none ;;
-    build)   rvm_env_ensure "${dir}" python3 ;;
+    build)   rvm_env_ensure "${dir}" ;;
     publish) rvm_env_publish "${k}" ;;
     *) rvm_die "rvm env <status|build|publish>" ;;
   esac
@@ -115,6 +116,7 @@ cmd_backup() {
   [ -f "${HOME}/.rvm-current" ] && . "${HOME}/.rvm-current"
   local proj="${RVM_PROJECT:-unknown}" iid dest
   iid="$(rvm_instance_id || echo local)"
+  [ -n "${RVM_REPO_DIR:-}" ] && rvm_memory_push "${RVM_REPO_DIR}"
   dest="s3://${RVM_BUCKET}/runs/${proj}/$(date -u +%Y%m%d-%H%M%S)-${iid}"
   for src in "${RVM_TARGET_HOME}/.claude/projects" /var/log/rvm-boot.log /var/log/cloud-init-output.log; do
     [ -e "${src}" ] || continue

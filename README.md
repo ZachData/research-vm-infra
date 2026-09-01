@@ -70,6 +70,7 @@ project can change how it runs without touching this repo. See
 s3://research-vm-shared-176048535722/
   envs/<arch>/py<ver>/<project>/<dephash>.tar.zst   venv cache
   caches/<name>/                                     shared data (HF, datasets)
+  memory/<project>/                                  agent memory, restored at boot
   runs/<project>/<ts>-<instance>/                    transcripts, boot logs
   <project>/...                                      whatever a project writes
 ```
@@ -89,10 +90,32 @@ console, or prune manually with admin credentials.
   with a 403. `/research-vm/github-deploy-key` is no longer used; deploy keys
   are per-repo, which is exactly the constraint being removed here.
 
-## Rebuilding the AMI (rarely)
+## The image
 
-Bake only project-agnostic things: apt packages, awscli, gh, zstd, Claude Code,
-and an empty `/opt/rvm`. Do **not** bake a repo or a venv — a baked venv is
-just a stale cache entry that the hash check will ignore anyway. `CreateImage`
-is not in the instance roles' permissions; do it from the console or with admin
-credentials, then update `ImageId` on both launch templates.
+One bake, then rarely again. `bake-prep.sh` is the whole procedure; run it as
+root on an instance whose repo is pushed, then take the AMI.
+
+**What the image contains** — only things that never expire: OS packages
+(`at`, `zstd`, `pigz`, `jq`, `ripgrep`, `tmux`, `build-essential`,
+`python3-venv`), awscli, gh, Claude Code and its login, `uv`, and a clone of
+this repo at `/opt/rvm/infra` on `PATH`.
+
+**What it must not contain**: a project repo, a venv, a git token, or an `at`
+job. The first two arrive at boot from S3 and GitHub; the token comes from SSM;
+a baked `at` job would fire on first boot of every instance made from the image
+and stop it seconds after launch.
+
+`bake-prep.sh` also clears per-instance identity — ssh host keys, machine-id,
+and cloud-init state. That last one is not cosmetic: without `cloud-init clean`
+an instance launched from the image can skip user-data entirely and come up
+with nothing configured and nothing scheduled to stop it.
+
+`uv` is what keeps the image general. A project pins its interpreter with
+`RVM_PYTHON` and uv fetches that CPython at boot, so a project on 3.11 and a
+project on 3.13 share one image. Pin it to whatever the project's CI runs —
+a skew there produces tests that pass in CI and fail on the instance, which
+costs a session before anyone suspects the interpreter.
+
+`CreateImage` is deliberately absent from the instance roles, so take the image
+with admin credentials or from the console; `bake-prep.sh` prints the exact
+commands, including the two launch-template updates that point at the new AMI.

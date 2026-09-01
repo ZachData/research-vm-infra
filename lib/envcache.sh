@@ -15,11 +15,12 @@
 . "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
 rvm_env_hash() {
-  local repo_dir="$1" py="${2:-python3}" h f
+  local repo_dir="$1" f
   {
-    echo "v1"
+    echo "v2"
     echo "arch=$(rvm_arch)"
-    echo "py=$(rvm_pyver "${py}")"
+    echo "py=${RVM_PYTHON}"
+    echo "gpu=$(rvm_has_gpu && echo 1 || echo 0)"
     echo "install=${RVM_ENV_INSTALL}"
     for f in ${RVM_ENV_FILES}; do
       if [ -f "${repo_dir}/${f}" ]; then
@@ -32,7 +33,7 @@ rvm_env_hash() {
 
 rvm_env_key() {
   printf 'envs/%s/py%s/%s/%s.tar.zst' \
-    "$(rvm_arch)" "$(rvm_pyver "${2:-python3}")" "${RVM_PROJECT}" "$1"
+    "$(rvm_arch)" "${RVM_PYTHON}" "${RVM_PROJECT}" "$1"
 }
 
 rvm_env_exists() {
@@ -43,9 +44,9 @@ rvm_env_exists() {
 # Restore or build, then leave a usable venv at ${RVM_VENV}. Idempotent:
 # a venv already carrying the right hash is left completely alone.
 rvm_env_ensure() {
-  local repo_dir="$1" py="${2:-python3}" hash key stamp
-  hash="$(rvm_env_hash "${repo_dir}" "${py}")"
-  key="$(rvm_env_key "${hash}" "${py}")"
+  local repo_dir="$1" hash key stamp
+  hash="$(rvm_env_hash "${repo_dir}")"
+  key="$(rvm_env_key "${hash}")"
   stamp="${RVM_VENV}/.rvm-env-hash"
 
   if [ -f "${stamp}" ] && [ "$(cat "${stamp}")" = "${hash}" ]; then
@@ -61,7 +62,7 @@ rvm_env_ensure() {
     rvm_log "env ${hash}: cache miss"
   fi
 
-  rvm_env_build "${repo_dir}" "${py}" "${hash}"
+  rvm_env_build "${repo_dir}" "${hash}"
   rvm_env_publish "${key}"
 }
 
@@ -88,13 +89,39 @@ rvm_env_restore() {
 }
 
 rvm_env_build() {
-  local repo_dir="$1" py="$2" hash="$3"
-  rvm_log "building venv at ${RVM_VENV} (this is the slow path)"
+  local repo_dir="$1" hash="$2" f
+  rvm_log "building venv at ${RVM_VENV} for python ${RVM_PYTHON} (slow path)"
   rm -rf "${RVM_VENV}"
-  "${py}" -m venv "${RVM_VENV}"
+  if command -v uv >/dev/null 2>&1; then
+    # uv downloads the requested CPython if the box does not have it, which
+    # is what lets one image serve projects pinned to different versions.
+    # --seed puts pip in the venv, since RVM_ENV_INSTALL is written in pip.
+    uv venv --python "${RVM_PYTHON}" --seed "${RVM_VENV}" \
+      || rvm_die "uv could not provide python ${RVM_PYTHON}"
+  else
+    command -v "python${RVM_PYTHON}" >/dev/null \
+      || rvm_die "python${RVM_PYTHON} not installed and uv unavailable"
+    "python${RVM_PYTHON}" -m venv "${RVM_VENV}"
+  fi
   # shellcheck disable=SC1091
   . "${RVM_VENV}/bin/activate"
   pip install --quiet --upgrade pip wheel
+
+  # torch resolves to a CUDA build by default on both x86_64 and aarch64.
+  # On a GPU-less instance that is ~3 GB of libraries that cannot run —
+  # paid for on every cache miss and every restore. Pre-install the CPU
+  # build so the project's own install finds torch already satisfied.
+  if ! rvm_has_gpu; then
+    for f in ${RVM_ENV_FILES}; do
+      if [ -f "${repo_dir}/${f}" ] && grep -qi '^[^#]*torch' "${repo_dir}/${f}"; then
+        rvm_log "no GPU: installing the CPU torch build"
+        pip install --quiet torch --index-url https://download.pytorch.org/whl/cpu \
+          || rvm_log "CPU torch index failed; falling back to the default resolution"
+        break
+      fi
+    done
+  fi
+
   ( cd "${repo_dir}" && eval "${RVM_ENV_INSTALL}" ) \
     || rvm_die "env install failed: ${RVM_ENV_INSTALL}"
   echo "${hash}" > "${RVM_VENV}/.rvm-env-hash"
