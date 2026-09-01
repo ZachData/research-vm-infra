@@ -75,6 +75,17 @@ cmd_new() {
   fi
   [ -f "${dir}/infra/prompt.md" ] || \
     cp "${RVM_INFRA_DIR}/templates/prompt.md" "${dir}/infra/prompt.md"
+  # The Popperian skeleton: status board, pre-registered criteria, decisions
+  # log, open questions. Scaffolded only when absent — an existing PROJECT.md
+  # is the project's own and is never touched.
+  if [ ! -f "${dir}/PROJECT.md" ]; then
+    sed "s|__PROJECT__|${name}|g" "${RVM_INFRA_DIR}/templates/PROJECT.md" > "${dir}/PROJECT.md"
+    echo "wrote ${dir}/PROJECT.md — fill in the question, gates and thresholds BEFORE any data"
+  fi
+  if [ ! -f "${dir}/CLAUDE.md" ]; then
+    cp "${RVM_INFRA_DIR}/templates/CLAUDE.md" "${dir}/CLAUDE.md"
+    echo "wrote ${dir}/CLAUDE.md"
+  fi
   echo "then: git -C ${dir} add infra && git -C ${dir} commit -m 'add rvm config' && git -C ${dir} push"
   echo "then: rvm launch ${slug}"
 }
@@ -156,6 +167,10 @@ cmd_doctor() {
   chk "ssm github pat"   "aws ssm get-parameter --name ${RVM_PAT_PARAM} --with-decryption --region ${RVM_REGION}"
   chk "github reachable" "git ls-remote https://github.com/${RVM_INFRA_REPO}.git HEAD"
   chk "gh authenticated" "gh auth status"
+  # A token scoped to selected repositories reads fine and fails at push.
+  # Without this check that surfaces hours into a run, when a worker tries
+  # to push its cell result and cannot.
+  chk "infra repo push access" "[ \"$(gh api repos/${RVM_INFRA_REPO} --jq .permissions.push 2>/dev/null)\" = true ]"
   chk "claude cli"       "command -v claude"
   chk "zstd"             "command -v zstd"
   printf '%-28s' "disk free >10G"
@@ -164,6 +179,7 @@ cmd_doctor() {
     # shellcheck disable=SC1091
     . "${HOME}/.rvm-current"
     printf '%-28s%s\n' "project" "${RVM_PROJECT} @ ${RVM_REPO_DIR}"
+    chk "project push access" "[ \"$(gh api repos/${RVM_SLUG} --jq .permissions.push 2>/dev/null)\" = true ]"
     printf '%-28s' "venv importable"
     "${RVM_VENV}/bin/python" -c 'import sys' 2>/dev/null && echo ok || { echo FAIL; fail=1; }
   fi
