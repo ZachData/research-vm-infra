@@ -1,0 +1,34 @@
+#!/bin/bash
+# Generic EC2 user-data. The ONLY thing that varies between projects is the
+# handful of values substituted below, so switching projects never needs a
+# new AMI and never needs a new launch template — just a different launch
+# argument. Everything else is pulled at boot from the infra repo, which
+# means a fix to the boot path ships with a git push, not an image bake.
+set -euo pipefail
+exec > >(tee -a /var/log/rvm-boot.log) 2>&1
+
+PROJECT="__PROJECT__"
+ROLE="__ROLE__"
+WORKER_ID="__WORKER_ID__"
+BRANCH="__BRANCH__"
+INFRA_REPO="__INFRA_REPO__"
+INFRA_REF="__INFRA_REF__"
+INFRA_DIR="/opt/rvm/infra"
+REGION="__REGION__"
+export RVM_BRANCH="${BRANCH}" RVM_INFRA_DIR="${INFRA_DIR}" RVM_AUTORUN="__AUTORUN__"
+
+PAT="$(aws ssm get-parameter --name /research-vm/github-pat --with-decryption \
+       --region "${REGION}" --query Parameter.Value --output text)"
+
+mkdir -p /opt/rvm
+if [ -d "${INFRA_DIR}/.git" ]; then
+  git -C "${INFRA_DIR}" fetch --all -q && git -C "${INFRA_DIR}" reset --hard -q "origin/${INFRA_REF}"
+else
+  git clone -q -b "${INFRA_REF}" \
+    "https://x-access-token:${PAT}@github.com/${INFRA_REPO}.git" "${INFRA_DIR}"
+fi
+# Never leave the token in a remote URL on disk; bootstrap.sh sets up a
+# proper credential store instead.
+git -C "${INFRA_DIR}" remote set-url origin "https://github.com/${INFRA_REPO}.git"
+
+exec "${INFRA_DIR}/bootstrap.sh" "${PROJECT}" "${ROLE}" "${WORKER_ID}"

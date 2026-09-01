@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+# rvm — one CLI for the whole fleet.
+#
+#   rvm launch <owner/repo> [--role orchestrator|worker] [--worker-id N]
+#                           [--branch B] [--type t4g.small] [--autorun]
+#   rvm new <owner/repo>        scaffold infra/rvm.env + infra/prompt.md in a repo
+#   rvm env <status|build|publish>
+#   rvm cache <pull|push> <name> <path>
+#   rvm backup                  push transcripts + results to S3 before terminate
+#   rvm restore-transcripts <project>
+#   rvm doctor                  pre-flight: creds, bucket, PAT, repo, env, disk
+#   rvm ps                      running fleet instances
+set -euo pipefail
+RVM_INFRA_DIR="${RVM_INFRA_DIR:-$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)}"
+# shellcheck source=../lib/common.sh
+. "${RVM_INFRA_DIR}/lib/common.sh"
+# shellcheck source=../lib/envcache.sh
+. "${RVM_INFRA_DIR}/lib/envcache.sh"
+
+usage() { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-1}"; }
+
+cmd_launch() {
+  local slug role=orchestrator wid="" branch="" itype="" autorun=0 quiet=0 tmpl ud out
+  slug="$(rvm_repo_slug "${1:?usage: rvm launch <owner/repo>}")"; shift
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --role) role="$2"; shift 2 ;;
+      --worker-id) wid="$2"; shift 2 ;;
+      --branch) branch="$2"; shift 2 ;;
+      --type) itype="$2"; shift 2 ;;
+      --autorun) autorun=1; shift ;;
+      --quiet-id) quiet=1; shift ;;
+      *) rvm_die "unknown flag $1" ;;
+    esac
+  done
+  rvm_load_project "${slug}"
+  branch="${branch:-${RVM_BRANCH}}"
+  itype="${itype:-${RVM_INSTANCE_TYPE}}"
+  local template="${RVM_ORCH_TEMPLATE}"
+  [ "${role}" = worker ] && template="${RVM_WORKER_TEMPLATE}"
+
+  ud="$(mktemp /tmp/rvm-ud-XXXX.sh)"
+  sed -e "s|__PROJECT__|${slug}|g" -e "s|__ROLE__|${role}|g" \
+      -e "s|__WORKER_ID__|${wid}|g" -e "s|__BRANCH__|${branch}|g" \
+      -e "s|__INFRA_REPO__|${RVM_INFRA_REPO}|g" -e "s|__INFRA_REF__|${RVM_INFRA_REF:-main}|g" \
+      -e "s|__REGION__|${RVM_REGION}|g" -e "s|__AUTORUN__|${autorun}|g" \
+      "${RVM_INFRA_DIR}/boot/user-data.sh.tmpl" > "${ud}"
+
+  out="$(aws ec2 run-instances --region "${RVM_REGION}" \
+    --launch-template "LaunchTemplateName=${template}" \
+    --instance-type "${itype}" \
+    --user-data "file://${ud}" \
+    --tag-specifications \
+      "ResourceType=instance,Tags=[{Key=Project,Value=research-vm},{Key=RvmProject,Value=${RVM_PROJECT}},{Key=Role,Value=${role}},{Key=WorkerId,Value=${wid:-none}}]" \
+      "ResourceType=volume,Tags=[{Key=Project,Value=research-vm},{Key=RvmProject,Value=${RVM_PROJECT}}]" \
+    --query 'Instances[0].InstanceId' --output text)"
+  rm -f "${ud}"
+  if [ "${quiet}" = 1 ]; then echo "${out}"
+  else printf 'launched %s  project=%s role=%s branch=%s type=%s\n' \
+       "${out}" "${RVM_PROJECT}" "${role}" "${branch}" "${itype}"; fi
+}
+
+cmd_new() {
+  local slug name dir
+  slug="$(rvm_repo_slug "${1:?usage: rvm new <owner/repo>}")"
+  name="$(rvm_repo_name "${slug}")"
+  dir="${2:-${RVM_TARGET_HOME}/${name}}"
+  [ -d "${dir}" ] || git clone "https://github.com/${slug}.git" "${dir}"
+  mkdir -p "${dir}/infra"
+  if [ -f "${dir}/infra/rvm.env" ]; then
+    echo "${dir}/infra/rvm.env already exists; leaving it alone"
+  else
+    sed "s|__PROJECT__|${name}|g" "${RVM_INFRA_DIR}/templates/rvm.env" > "${dir}/infra/rvm.env"
+    echo "wrote ${dir}/infra/rvm.env — edit RVM_ENV_INSTALL / RVM_WORKER_CMD"
+  fi
+  [ -f "${dir}/infra/prompt.md" ] || \
+    cp "${RVM_INFRA_DIR}/templates/prompt.md" "${dir}/infra/prompt.md"
+  echo "then: git -C ${dir} add infra && git -C ${dir} commit -m 'add rvm config' && git -C ${dir} push"
+  echo "then: rvm launch ${slug}"
+}
+
+cmd_env() {
+  local sub="${1:-status}" dir
+  # shellcheck disable=SC1091
+  [ -f "${HOME}/.rvm-current" ] && . "${HOME}/.rvm-current"
+  dir="${RVM_REPO_DIR:-$PWD}"
+  rvm_load_project "${RVM_SLUG:-$(basename "${dir}")}" "${dir}"
+  local h k; h="$(rvm_env_hash "${dir}")"; k="$(rvm_env_key "${h}")"
+  case "${sub}" in
+    status)
+      echo "project : ${RVM_PROJECT}"
+      echo "repo    : ${dir}"
+      echo "hash    : ${h}"
+      echo "key     : s3://${RVM_BUCKET}/${k}"
+      echo -n "cached  : "; rvm_env_exists "${k}" && echo yes || echo no
+      echo -n "local   : "; cat "${RVM_VENV}/.rvm-env-hash" 2>/dev/null || echo none ;;
+    build)   rvm_env_ensure "${dir}" python3 ;;
+    publish) rvm_env_publish "${k}" ;;
+    *) rvm_die "rvm env <status|build|publish>" ;;
+  esac
+}
+
+cmd_cache() {
+  case "${1:?}" in
+    pull) rvm_cache_pull "${2:?name}" "${3:?path}" ;;
+    push) rvm_cache_push "${2:?name}" "${3:?path}" ;;
+    *) rvm_die "rvm cache <pull|push> <name> <path>" ;;
+  esac
+}
+
+# Everything on this volume dies on terminate. Transcripts are the part
+# with no other copy — the repo is already on GitHub.
+cmd_backup() {
+  # shellcheck disable=SC1091
+  [ -f "${HOME}/.rvm-current" ] && . "${HOME}/.rvm-current"
+  local proj="${RVM_PROJECT:-unknown}" iid dest
+  iid="$(rvm_instance_id || echo local)"
+  dest="s3://${RVM_BUCKET}/runs/${proj}/$(date -u +%Y%m%d-%H%M%S)-${iid}"
+  for src in "${RVM_TARGET_HOME}/.claude/projects" /var/log/rvm-boot.log /var/log/cloud-init-output.log; do
+    [ -e "${src}" ] || continue
+    if [ -d "${src}" ]; then
+      aws s3 sync "${src}/" "${dest}/$(basename "${src}")/" --region "${RVM_REGION}" --only-show-errors
+    else
+      aws s3 cp "${src}" "${dest}/$(basename "${src}")" --region "${RVM_REGION}" --only-show-errors
+    fi
+  done
+  echo "${dest}"
+}
+
+cmd_restore_transcripts() {
+  local proj="${1:?usage: rvm restore-transcripts <project>}"
+  aws s3 sync "s3://${RVM_BUCKET}/runs/${proj}/" "${RVM_TARGET_HOME}/rvm-runs/${proj}/" \
+    --region "${RVM_REGION}" --only-show-errors
+  echo "${RVM_TARGET_HOME}/rvm-runs/${proj}/"
+}
+
+cmd_ps() {
+  aws ec2 describe-instances --region "${RVM_REGION}" \
+    --filters 'Name=tag:Project,Values=research-vm' \
+              'Name=instance-state-name,Values=pending,running,stopping,stopped' \
+    --query 'Reservations[].Instances[].[InstanceId,State.Name,InstanceType,Tags[?Key==`RvmProject`]|[0].Value,Tags[?Key==`Role`]|[0].Value,LaunchTime]' \
+    --output table
+}
+
+# Pre-flight. Cheap to run, and every one of these has cost a real session
+# when it was wrong: a run that dies three hours in on a missing checkpoint
+# or an expired token is the whole session.
+cmd_doctor() {
+  local fail=0
+  chk() { printf '%-28s' "$1"; if eval "$2" >/dev/null 2>&1; then echo ok; else echo FAIL; fail=1; fi; }
+  chk "aws credentials"  "aws sts get-caller-identity"
+  chk "s3 bucket read"   "aws s3 ls s3://${RVM_BUCKET}/ --region ${RVM_REGION}"
+  chk "s3 bucket write"  "echo probe | aws s3 cp - s3://${RVM_BUCKET}/_doctor/probe.txt --region ${RVM_REGION}"
+  chk "ssm github pat"   "aws ssm get-parameter --name ${RVM_PAT_PARAM} --with-decryption --region ${RVM_REGION}"
+  chk "github reachable" "git ls-remote https://github.com/${RVM_INFRA_REPO}.git HEAD"
+  chk "gh authenticated" "gh auth status"
+  chk "claude cli"       "command -v claude"
+  chk "zstd"             "command -v zstd"
+  printf '%-28s' "disk free >10G"
+  [ "$(df --output=avail -BG / | tail -1 | tr -dc 0-9)" -gt 10 ] && echo ok || { echo FAIL; fail=1; }
+  if [ -f "${HOME}/.rvm-current" ]; then
+    # shellcheck disable=SC1091
+    . "${HOME}/.rvm-current"
+    printf '%-28s%s\n' "project" "${RVM_PROJECT} @ ${RVM_REPO_DIR}"
+    printf '%-28s' "venv importable"
+    "${RVM_VENV}/bin/python" -c 'import sys' 2>/dev/null && echo ok || { echo FAIL; fail=1; }
+  fi
+  return "${fail}"
+}
+
+case "${1:-}" in
+  launch) shift; cmd_launch "$@" ;;
+  new)    shift; cmd_new "$@" ;;
+  env)    shift; cmd_env "$@" ;;
+  cache)  shift; cmd_cache "$@" ;;
+  backup) shift; cmd_backup "$@" ;;
+  restore-transcripts) shift; cmd_restore_transcripts "$@" ;;
+  ps)     shift; cmd_ps "$@" ;;
+  doctor) shift; cmd_doctor "$@" ;;
+  ""|-h|--help) usage 0 ;;
+  *) usage 1 ;;
+esac
