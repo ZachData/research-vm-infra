@@ -3,9 +3,11 @@
 # the role is `worker`, as root; the cell itself runs as the target user.
 #   worker.sh <owner/repo> <worker_id>
 #
-# Success: push -> cancel the hard cap -> shutdown -h now, which the launch
-# template turns into a terminate. Failure: stop, not terminate, so the
-# volume survives for inspection.
+# Either outcome ends in `shutdown -h now`, which the worker template
+# (InstanceInitiatedShutdownBehavior=terminate) turns into a terminate. A
+# one-time spot instance cannot be stopped, and a reclaim can take the volume
+# mid-run regardless, so a failed cell is inspected from its pushed partial
+# result plus `rvm backup`, never from a stopped box.
 set -euo pipefail
 
 RVM_INFRA_DIR="${RVM_INFRA_DIR:-/opt/rvm/infra}"
@@ -68,10 +70,10 @@ done
 
 "${RVM_INFRA_DIR}/bin/rvm" backup || true
 
+atrm "$(cat /run/rvm-hardcap-job 2>/dev/null || echo x)" 2>/dev/null || true
 if [ "${PUSHED}" = true ] && [ "${CELL_RC}" -eq 0 ]; then
-  atrm "$(cat /run/rvm-hardcap-job 2>/dev/null || echo x)" 2>/dev/null || true
-  shutdown -h now
+  rvm_log "cell ok and pushed — terminating"
 else
-  rvm_log "cell rc=${CELL_RC} pushed=${PUSHED} — stopping for inspection, not terminating"
-  aws ec2 stop-instances --region "${RVM_REGION}" --instance-ids "${INSTANCE_ID}"
+  rvm_log "cell rc=${CELL_RC} pushed=${PUSHED} — terminating; inspect the pushed partial + rvm backup"
 fi
+shutdown -h now

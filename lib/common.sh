@@ -137,7 +137,7 @@ rvm_load_project() {
   RVM_ENV_INSTALL="pip install -e '.[dev]'"
   RVM_ENV_FILES="pyproject.toml requirements.txt uv.lock poetry.lock setup.py"
   RVM_HARD_CAP_HOURS=4
-  RVM_WORKER_HOURS=3
+  RVM_WORKER_HOURS=2
   # Daemon lifetime. The lease is short and renewed while the daemon is
   # provably alive; the ceiling is set once and never renewed, so even a
   # daemon spinning on a wedged loop dies on schedule. C5 keeps its teeth.

@@ -37,7 +37,15 @@ cmd_launch() {
   branch="${branch:-${RVM_BRANCH}}"
   itype="${itype:-${RVM_INSTANCE_TYPE}}"
   local template="${RVM_ORCH_TEMPLATE}"
-  [ "${role}" = worker ] && template="${RVM_WORKER_TEMPLATE}"
+  # Workers are spot-only. The worker template's default version already carries
+  # this, but assert it on the command too so a template default that ever
+  # regresses to on-demand cannot silently produce one. The IAM policy is the
+  # real gate (RunInstances is denied for anything but spot-from-this-template).
+  local market=()
+  if [ "${role}" = worker ]; then
+    template="${RVM_WORKER_TEMPLATE}"
+    market=(--instance-market-options 'MarketType=spot,SpotOptions={SpotInstanceType=one-time,InstanceInterruptionBehavior=terminate}')
+  fi
 
   ud="$(mktemp /tmp/rvm-ud-XXXX.sh)"
   sed -e "s|__PROJECT__|${slug}|g" -e "s|__ROLE__|${role}|g" \
@@ -49,6 +57,7 @@ cmd_launch() {
   out="$(aws ec2 run-instances --region "${RVM_REGION}" \
     --launch-template "LaunchTemplateName=${template}" \
     --instance-type "${itype}" \
+    ${market[@]+"${market[@]}"} \
     --user-data "file://${ud}" \
     --tag-specifications \
       "ResourceType=instance,Tags=[{Key=Project,Value=research-vm},{Key=RvmProject,Value=${RVM_PROJECT}},{Key=Role,Value=${role}},{Key=WorkerId,Value=${wid:-none}}]" \

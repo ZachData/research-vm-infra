@@ -28,10 +28,19 @@ rvm_log "bootstrap: project=${PROJECT_ARG} role=${ROLE} instance=${INSTANCE_ID}"
 # cap that never gets set.
 apt-get install -y at >/dev/null 2>&1 || true
 systemctl enable --now atd >/dev/null 2>&1 || true
-CAP_JOB="$(echo "aws ec2 stop-instances --region ${RVM_REGION} --instance-ids ${INSTANCE_ID}" \
+# A one-time spot instance (every worker) cannot be stopped, only terminated,
+# so its cap does an OS shutdown — the worker template's
+# InstanceInitiatedShutdownBehavior=terminate turns that into a terminate, and
+# it needs no EC2 permissions. The orchestrator is on-demand and stoppable.
+if [ "${ROLE}" = "worker" ]; then
+  CAP_CMD="shutdown -h now"
+else
+  CAP_CMD="aws ec2 stop-instances --region ${RVM_REGION} --instance-ids ${INSTANCE_ID}"
+fi
+CAP_JOB="$(echo "${CAP_CMD}" \
   | at now + "${RVM_BOOT_CAP_HOURS:-4}" hours 2>&1 | grep -o 'job [0-9]*' | awk '{print $2}' || true)"
 echo "${CAP_JOB}" > /run/rvm-hardcap-job
-rvm_log "hard cap set (job ${CAP_JOB}, ${RVM_BOOT_CAP_HOURS:-4}h)"
+rvm_log "hard cap set (job ${CAP_JOB}, ${RVM_BOOT_CAP_HOURS:-4}h, role=${ROLE})"
 
 # --- 0b. boot receipt ---
 # An unattended instance has no other way to say what happened. Every exit
@@ -143,13 +152,15 @@ fi
 
 # The boot cap in step 0 used the built-in default, since no project config
 # had been read yet. Now that one has, replace it with the project's value.
+# Worker default is 2h (RVM_WORKER_HOURS); a project raises it in infra/rvm.env
+# for a cell that genuinely needs longer. Same shutdown-vs-stop split as step 0.
 if [ "${ROLE}" = "worker" ]; then HOURS="${RVM_WORKER_HOURS}"; else HOURS="${RVM_HARD_CAP_HOURS}"; fi
 if [ "${HOURS}" != "${RVM_BOOT_CAP_HOURS:-4}" ]; then
   atrm "$(cat /run/rvm-hardcap-job)" 2>/dev/null || true
-  CAP_JOB="$(echo "aws ec2 stop-instances --region ${RVM_REGION} --instance-ids ${INSTANCE_ID}" \
+  CAP_JOB="$(echo "${CAP_CMD}" \
     | at now + "${HOURS}" hours 2>&1 | grep -o 'job [0-9]*' | awk '{print $2}' || true)"
   echo "${CAP_JOB}" > /run/rvm-hardcap-job
-  rvm_log "hard cap reset to ${HOURS}h (job ${CAP_JOB})"
+  rvm_log "hard cap reset to ${HOURS}h (job ${CAP_JOB}, role=${ROLE})"
 fi
 
 if [ "${ROLE}" != "worker" ]; then
