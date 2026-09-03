@@ -21,7 +21,7 @@ AMI (stable) ──> user-data (15 generic lines, project name substituted)
                         ├─ clone/reset the project repo
                         ├─ restore the venv from S3, keyed by dependency hash
                         ├─ pull shared data caches (HF checkpoints, datasets)
-                        ├─ hard cap + idle alarm
+                        ├─ hard cap (idle alarm still emitted; being retired — ROADMAP)
                         └─ wrapper.sh (orchestrator) | worker.sh (sweep cell)
 ```
 
@@ -85,10 +85,11 @@ console, or prune manually with admin credentials.
 - The two launch templates supply the AMI, IAM profile and security group.
   `rvm launch` overrides their user-data and instance type, so one pair of
   templates serves every project. They are only touched to change the AMI.
-- `/research-vm/github-pat` in SSM. It must be able to see every project repo —
-  if it is ever narrowed to selected repositories, a new project fails at clone
-  with a 403. `/research-vm/github-deploy-key` is no longer used; deploy keys
-  are per-repo, which is exactly the constraint being removed here.
+- `/research-vm/github-pat` in SSM, rescoped to all-repositories 2026-09-03. It
+  must stay that way — if it is ever narrowed to selected repositories, a new
+  project fails at clone with a 403. `/research-vm/github-deploy-key` is no
+  longer used (deploy keys are per-repo, the constraint being removed here) but
+  the SSM parameter still exists — retire it (`ROADMAP.md` §6).
 
 ## The image
 

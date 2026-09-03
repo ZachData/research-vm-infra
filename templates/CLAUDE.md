@@ -117,6 +117,18 @@ Tier 2.5 runs over every record in the repo, not just new ones, so a metric-vers
 
 This repo runs on the shared research fleet; see `infra/rvm.env` for how. `RVM_PYTHON` must match CI. Results and transcripts are backed up to S3 before an instance terminates, but **the repo is the only durable record** — an unpushed commit does not exist.
 
+### Workers
+
+Launching workers is allowed and expected — it is the answer whenever work does not fit on the orchestrator, before you conclude you are blocked or hand back to a human. Put the fan-out in `sweep_manifest.json` and let `infra/wrapper.sh` launch it; each entry may set its own `cmd` and `instance_type`.
+
+- **Spot only.** Every worker is a one-time spot instance. Never launch on-demand, never pass your own `--instance-market-options`, never "fall back to on-demand because spot failed" — a spot failure is a finding: record it and stop.
+- **Smallest thing that works.** Start at the launch-template default size; step up one size only on a *demonstrated* OOM, never on a guess. Prefer many small workers to one big one. Never launch a GPU instance without human sign-off recorded in `PROJECT.md`.
+- A reclaim kills a worker mid-run, so write results incrementally and sync to S3 as you go. "The instance is gone" is never "the work is done" — the pushed result commit is the completion signal.
+
+### Not yours to do
+
+Provisioning outside the worker pattern: resizing/stopping/starting the orchestrator, IAM changes, creating or repointing launch-template versions, or touching any resource not tagged `Project=research-vm`.
+
 ## When finishing
 
 Update the status board. Append decisions to §9, uncertainties to §10. Leave the tree clean and pushed.

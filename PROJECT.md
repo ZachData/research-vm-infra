@@ -20,12 +20,18 @@ The system is infrastructure, not science, but the discipline is the same: every
 | Setup | Agent memory survives terminate | ● | `s3://…/memory/<project>/`, pushed by `rvm backup`, restored by bootstrap. Untested against a real memory write (§10) |
 | Setup | Boot receipts | ● | Every exit path writes status + elapsed + log tail to `s3://…/boot-receipts/`. Verified locally against a synthetic invocation |
 | Setup | Hard cap set before anything that can fail | ● | Was set at the end of bootstrap, under `set -e`: a failed clone left an instance running with no cap. Now first, then reset to the project's value once config is read |
-| G0 | Cold start on a second project, from a real launch | ○ | **The gate that matters.** Everything above is measured on a warm, hand-configured box. Blocked on PAT repository scope (§10) |
+| G0 | Cold start on a second project, from a real launch | ○ | **The gate that matters.** Everything above is measured on a warm, hand-configured box. PAT scope unblocked 2026-09-03 (§10); now just needs a real launch |
 | G1 | Bake the generic image; relaunch both projects from it | ○ | `bake-prep.sh` written and reviewed, not yet run. One bake, then rarely |
 | G2 | Sweep fan-out under the generic worker path | ○ | Worker path is a rewrite of a mechanism that worked; it has not run a real cell |
 | G3 | A dependency change costs no AMI rebuild, demonstrated end to end | ○ | Edit `pyproject.toml` → boot → observe a miss, a build, a publish, and a hit on the next boot |
 
 Legend: ○ not started · ◐ in progress · ● done · ✗ failed/abandoned
+
+> **Direction note (2026-09-03).** `ROADMAP.md` tracks a shift from ephemeral
+> instances (this board's G0–G3) to one long-lived daemon-orchestrator per
+> project under an ASG of size 1. Where §3's mechanism (idle alarm, terminate
+> on green) disagrees with `ROADMAP.md`, the roadmap is the newer decision and
+> wins; settled pieces fold back here once proven by a real launch.
 
 ---
 
@@ -44,9 +50,9 @@ The inversion: **the image holds only what never changes; everything that change
 | Account / region | `176048535722` / `us-east-2` |
 | Bucket | `research-vm-shared-176048535722` — put and get, **no `s3:DeleteObject`** (§10) |
 | Roles | `research-vm-ssm-role` (orchestrator), `research-vm-worker-role` (worker) |
-| Launch templates | `small_t4g_template`, `research-vm-worker-template` — supply AMI, IAM profile, security group; `rvm launch` overrides user-data and instance type, so one pair serves every project |
-| Instances | `t4g.small`, arm64, 2 vCPU / 2 GB, no GPU |
-| Secret | `/research-vm/github-pat` in SSM. Must be able to see and push to every project repo |
+| Launch templates | `small_t4g_template` (orchestrator, on-demand), `research-vm-worker-template` (worker) — supply AMI, IAM profile, security group; `rvm launch` overrides user-data and instance type but **not** the template version. Worker template default is v4, which carries one-time **spot** options; v1–v3 do not. Worker spot therefore depends on v4 staying the default version |
+| Instances | `t4g.small`, arm64, 2 vCPU / ~1.8 GB usable / no swap, no GPU |
+| Secret | `/research-vm/github-pat` in SSM, rescoped to all-repositories 2026-09-03. Sees and pushes every project repo |
 | Image | Currently `ami-0d469967250a418da` (Lora-specific). To be replaced once, by `bake-prep.sh` |
 
 ## 3. Mechanism
@@ -62,7 +68,7 @@ AMI ──> user-data (project name substituted; everything else fixed)
                3.  venv: hash → restore, or build → publish
                4.  data caches; 4b. agent memory
                5.  ~/.rvm-current, shell autostart
-               6.  cap reset to the project's value; idle alarm
+               6.  cap reset to the project's value; idle alarm (being retired — ROADMAP)
                7.  wrapper.sh | worker.sh
 ```
 
@@ -140,7 +146,7 @@ C4 and C5 are the ones with teeth. C1–C3 fail visibly; C4 and C5 fail silently
 
 ## 10. Open questions
 
-- **PAT repository scope.** The token is scoped to selected repositories: it can push to `Lora_inductionhead` and `MetastableStateAnalysis` but 404s on `research-vm-infra`. Until it is switched to all-repositories, every new project needs a manual token edit — which defeats C1. This is the current G0 blocker.
+- **PAT repository scope — RESOLVED 2026-09-03.** `/research-vm/github-pat` was rescoped to all-repositories (contents read/write, administration, code, workflows). It no longer 404s on `research-vm-infra` or on a new project repo, so C1 is unblocked here. Follow-up: the token now carries `administration`, broader than a box token needs — see `ROADMAP.md` §7.
 - **No `s3:DeleteObject`.** Nothing prunes the env cache; entries accumulate at 0.3–3 GB each. A superseded 2.7 GB py3.12 artifact is already stranded. Needs a lifecycle rule on `envs/`, set from the console.
 - **Worker-role S3 permissions are unverified.** The orchestrator role can put; whether `research-vm-worker-role` can read the env cache and write receipts has not been tested. If it cannot, every worker takes the slow build path or dies before its cap is set.
 - **Concurrent publish.** Several workers missing the same key will each build and each upload. Wasteful, not incorrect — last writer wins on identical content. Worth a guard only if it is ever observed.
