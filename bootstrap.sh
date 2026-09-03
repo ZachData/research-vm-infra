@@ -154,7 +154,11 @@ fi
 # had been read yet. Now that one has, replace it with the project's value.
 # Worker default is 2h (RVM_WORKER_HOURS); a project raises it in infra/rvm.env
 # for a cell that genuinely needs longer. Same shutdown-vs-stop split as step 0.
-if [ "${ROLE}" = "worker" ]; then HOURS="${RVM_WORKER_HOURS}"; else HOURS="${RVM_HARD_CAP_HOURS}"; fi
+case "${ROLE}" in
+  worker) HOURS="${RVM_WORKER_HOURS}" ;;
+  daemon) HOURS="${RVM_MAX_LIFETIME_HOURS}" ;;   # ceiling: never renewed, the wedged-loop backstop
+  *)      HOURS="${RVM_HARD_CAP_HOURS}" ;;
+esac
 if [ "${HOURS}" != "${RVM_BOOT_CAP_HOURS:-4}" ]; then
   atrm "$(cat /run/rvm-hardcap-job)" 2>/dev/null || true
   CAP_JOB="$(echo "${CAP_CMD}" \
@@ -163,17 +167,10 @@ if [ "${HOURS}" != "${RVM_BOOT_CAP_HOURS:-4}" ]; then
   rvm_log "hard cap reset to ${HOURS}h (job ${CAP_JOB}, role=${ROLE})"
 fi
 
-if [ "${ROLE}" != "worker" ]; then
-  aws cloudwatch put-metric-alarm --region "${RVM_REGION}" \
-    --alarm-name "research-vm-idle-${INSTANCE_ID}" \
-    --alarm-description "Stop ${INSTANCE_ID} if CPU stays low for 30 min" \
-    --namespace AWS/EC2 --metric-name CPUUtilization \
-    --dimensions "Name=InstanceId,Value=${INSTANCE_ID}" \
-    --statistic Average --period 300 --evaluation-periods 6 \
-    --threshold 5 --comparison-operator LessThanThreshold \
-    --alarm-actions "arn:aws:automate:${RVM_REGION}:ec2:stop" \
-    --treat-missing-data notBreaching || rvm_log "idle alarm not set (permissions?)"
-fi
+# No idle-CPU stop alarm. It repeatedly stopped instances that were mid-work,
+# and under the daemon model an idle box between units of work is expected.
+# Cost safety is the never-renewed lifetime ceiling above plus alert-only
+# Budgets; the box is stopped deliberately with `rvm stop <project>`.
 
 RVM_ENV_HASH="$(cat "${RVM_VENV}/.rvm-env-hash" 2>/dev/null || echo unknown)"
 export RVM_ENV_HASH RVM_PROJECT RVM_PYTHON
@@ -184,6 +181,15 @@ rvm_log "bootstrap complete in $(( $(date +%s) - RVM_T0 ))s: ${RVM_PROJECT} @ ${
 # --- 7. hand off ---
 if [ "${ROLE}" = "worker" ]; then
   exec "${HERE}/worker.sh" "${PROJECT_ARG}" "${WORKER_ID}"
+fi
+if [ "${ROLE}" = "daemon" ]; then
+  # The maintenance loop runs under systemd so a crash restarts it and a
+  # reboot resumes it — the box now outlives every work cycle.
+  install -m 0644 "${HERE}/systemd/rvm-daemon.service" /etc/systemd/system/rvm-daemon.service
+  systemctl daemon-reload
+  systemctl enable --now rvm-daemon.service
+  rvm_log "rvm-daemon.service enabled and started"
+  exit 0
 fi
 if [ "${RVM_AUTORUN:-0}" = "1" ]; then
   su - "${RVM_TARGET_USER}" -c "RVM_INFRA_DIR='${RVM_INFRA_DIR}' '${HERE}/wrapper.sh' '${PROJECT_ARG}'"
