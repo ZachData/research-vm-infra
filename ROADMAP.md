@@ -72,7 +72,8 @@ removed on 2026-09-03 and are not coming back.
 | IaC | Terraform for the substrate | ✗ | Dropped 2026-09-03 (§7). Scope-creep / privilege risk: the orchestrator can push to this repo, so TF config or state here = the orchestrator editing its own permissions. Substrate stays console-managed by the user. `infra/tf/` to be removed or moved to a repo the fleet never clones |
 | IaC | `infra/tf/` scaffold + `project-orchestrator` module | ✗ | Parked with the Terraform decision. Kept in git history; not wired to anything |
 | Orchestrator | Generic launch template reads its project at runtime (tag/SSM), not via `sed` | ✗ | Was only needed for the ASG path. `rvm launch` does the `sed` substitution and that is fine for a hand-launched box |
-| Orchestrator | `bootstrap.sh`: replace 4h cap + idle-stop with daemon hand-off | ◐ | Cap stays only as a wedged-loop backstop; idle-stop deleted. Worker cap now does `shutdown`→terminate (spot can't be stopped); default 2h. Orchestrator hand-off to `daemon.sh` still TODO |
+| Orchestrator | `bootstrap.sh`: replace 4h cap + idle-stop with daemon hand-off | ◐ | Written 2026-09-03 on branch `spot-worker-cap-fix`, **unproven**. `daemon` role: ceiling = `RVM_MAX_LIFETIME_HOURS`, then `systemctl enable --now rvm-daemon`. Idle CPU alarm deleted from `bootstrap.sh` + `wrapper.sh`. Worker cap does `shutdown`→terminate, default 2h |
+| Orchestrator | `daemon.sh` + `rvm-daemon.service` | ◐ | Written 2026-09-03, unproven. Loop: renew lease → heartbeat (file + S3 + best-effort CloudWatch) → poll `/research-vm/daemon-control` → one `RVM_NO_TERMINATE=1 wrapper.sh` cycle → sleep. `rvm stop\|start <repo>` added to the CLI |
 | Orchestrator | Maintenance loop `daemon.sh` + systemd unit, `Restart=always` | ○ | Fresh Claude session per iteration; bounded by wall-clock + max-turns |
 | Orchestrator | Heartbeat to S3/CloudWatch each iteration; `rvm ps` reads it | ○ | |
 | Agent quality | Reviewer-agent pass on every PR before merge | ○ | Agent opens PRs only; never pushes to `main` |
@@ -333,11 +334,32 @@ no Terraform — `infra/tf/` parked, substrate is console-only and the user's.
 **Still B3/B4:** `bootstrap.sh` idle CPU alarm still created (Phase C removes it);
 no spot-interruption-notice handler.
 
+### 2026-09-03 (cont.) — branch pushed, Phase C core written
+
+- Branch **`spot-worker-cap-fix`** pushed: 3 commits (docs/decisions; spot cap
+  fix; Phase C). `infra/` left untracked pending the delete-vs-relocate call.
+- **PR not opened** — the box PAT lacks `pull_requests: write`. `gh pr create`
+  → "Resource not accessible by personal access token". This also blocks the
+  daemon's designed "open a PR" step, so Phase E's merge gate waits on the user
+  adding that scope to `/research-vm/github-pat`.
+- **Phase C core written (unproven, `bash -n` clean):**
+  - `daemon.sh` — lease renew → heartbeat (file + S3 + best-effort CloudWatch)
+    → poll `/research-vm/daemon-control` (`run` | `pause`) → one
+    `RVM_NO_TERMINATE=1 wrapper.sh` cycle → sleep `RVM_DAEMON_POLL_SECONDS`.
+  - `systemd/rvm-daemon.service` — `Restart=always`, `User=ubuntu`.
+  - `bootstrap.sh` — `daemon` role: ceiling cap = `RVM_MAX_LIFETIME_HOURS`
+    (never renewed), then `systemctl enable --now rvm-daemon`. Idle CPU alarm
+    block deleted here and in `wrapper.sh` (B3 done).
+  - `bin/rvm` — `rvm stop|start <owner/repo>` finds the box by tag.
+
 **Next**
 
-- Phase C: `daemon.sh` + `rvm-daemon.service`, drop the idle alarm, `rvm
-  stop/start <project>` = `aws ec2 stop/start-instances` on the tagged box.
-- Prove the worker code: `rvm launch <project> --role worker --worker-id 0`
-  against a repo with a trivial `RVM_WORKER_CMD`, read the receipt, confirm it
-  self-terminated at the cap.
+- **User:** open the PR; add `Pull requests: write` to the PAT; account-wide
+  AWS Budget → SNS.
+- **Prove Phase C:** `rvm launch <repo> --role daemon` — service active, loop
+  logs a cycle, heartbeat object appears, `rvm stop <repo>` works. And the
+  worker cap: `rvm launch <repo> --role worker --worker-id 0` self-terminates
+  at 2h.
+- Wire work-source priority into `templates/prompt.md`; decide the merge gate;
+  the "PR not push `main`" rework once the PAT allows it.
 - D1/D2/D3 still open. Decide `infra/tf/`: delete from this repo, or relocate.

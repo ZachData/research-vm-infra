@@ -1,7 +1,7 @@
 # Handoff
 
 _Read this first when resuming work on `research-vm-infra`. Updated at checkpoints.
-Last update: 2026-09-03, ~19:30 UTC. Resuming in ~90 min._
+Last update: 2026-09-03, ~21:30 UTC._
 
 ## Current goal
 
@@ -10,84 +10,93 @@ daemon-orchestrator per project. `ROADMAP.md` is the working tracker; `PROJECT.m
 is the source of truth for the core question. This file is the short "resume here"
 version.
 
-## State of the tree — NOTHING IS COMMITTED
+## State of the tree
 
-`git status`: 10 modified files + untracked `ROADMAP.md` and `infra/`.
-All of this session's work is working-tree only. The box persists across a stop
-(EBS), so a 90-min gap is fine, but **an unpushed change does not exist** for any
-instance that boots from `origin/main`.
+Branch **`spot-worker-cap-fix`** pushed to origin, 3 commits:
 
-Modified this session:
+1. `Docs: record no-ASG / no-Terraform decisions; fix stale claims`
+2. `Spot worker cap: terminate, not stop; default 2h; assert spot at launch`
+3. `Phase C: daemon role — maintenance loop under systemd, no idle alarm`
 
-| File | Why |
-|---|---|
-| `bootstrap.sh` | worker hard cap → `shutdown -h now` (terminate) instead of `aws ec2 stop-instances`, which a one-time spot instance rejects. Orchestrator path unchanged. |
-| `worker.sh` | failure path terminates via `shutdown` instead of `stop-instances`; header comment corrected |
-| `lib/common.sh`, `templates/rvm.env` | `RVM_WORKER_HOURS` default 3 → **2** |
-| `bin/rvm` | `--role worker` passes `--instance-market-options MarketType=spot` explicitly (belt-and-braces; IAM is the real gate) |
-| `CLAUDE.md` | "running AWS commands is this repo's job"; tightened the "Do not" bullet to the real exceptions |
-| `PROJECT.md` | PAT scope RESOLVED; direction banner → ROADMAP daemon model; RAM ~1.8 GB/no swap; spot-depends-on-v4 recorded |
-| `README.md` | idle-alarm line; PAT/deploy-key bullet |
-| `templates/CLAUDE.md` | new "Workers" (spot-only) + "Not yours to do" sections |
-| `.gitignore` | (pre-existing change, not mine) |
-| `ROADMAP.md`, `infra/` | untracked; created in earlier sessions |
+**PR not opened** — the box PAT lacks `pull_requests: write` (`gh pr create` →
+"Resource not accessible by personal access token"). Open it by hand:
+https://github.com/ZachData/research-vm-infra/pull/new/spot-worker-cap-fix
+
+Still untracked and deliberately uncommitted: `infra/` (the parked Terraform —
+its fate is an open decision).
 
 `git push` from this box: origin is an SSH URL whose only key is a deploy key for
 another repo. Push over HTTPS via the `gh` PAT:
-`git push https://github.com/ZachData/research-vm-infra.git HEAD:<branch>`
-(or `git remote set-url origin https://github.com/ZachData/research-vm-infra.git`).
+`git push https://github.com/ZachData/research-vm-infra.git HEAD:<branch>`.
 
-## What was done this session
+## What was done — 2026-09-03
 
-- **Cut ASG.** User runs the orchestrator by hand (stop overnight / run by day).
-  `rvm stop/start <project>` becomes `aws ec2 stop/start-instances` on the tagged
-  box. Recorded in `ROADMAP.md` §7; Phases A and D struck.
-- **Parked Terraform.** `infra/tf/` stays in the repo but is wired to nothing.
-  Reason: the orchestrator can push to this repo, so TF config/state here = the
-  orchestrator able to edit its own IAM. Substrate stays console-only, the user's.
-- **Spot worker verified end to end** (real launch, ~2 min, ~1¢):
-  - Spot `t4g.small` from `research-vm-worker-template` v4; IMDS `instance-life-cycle`
-    = `spot`; wrote hello-world to `s3://research-vm-shared-176048535722/spot-test/`
-    with the **worker role** (so `research-vm-worker-role` has `s3:PutObject`).
-  - **Bug reproduced:** `aws ec2 stop-instances` on it → `UnsupportedOperation`
-    ("one-time Spot Instance request"). This is why the old worker cap silently
-    did nothing on spot.
-  - IAM dry-run matrix: spot-from-worker-template ✅; on-demand any path ❌. So
-    **only spot, only from the worker template** — as intended.
-- Doc-accuracy pass across `CLAUDE.md` / `PROJECT.md` / `README.md` / templates
-  (details in `ROADMAP.md` §8).
-- Pulled `Lora_inductionhead` (91 commits, fast-forward).
+**Earlier session:** cut ASG; parked Terraform; verified a real spot worker end
+to end (IMDS `instance-life-cycle`=`spot`, wrote to the bucket with the worker
+role, `stop-instances` failed with `UnsupportedOperation` as expected, terminate
+worked); doc-accuracy pass; pulled `Lora_inductionhead` (91 commits).
+
+**This session:**
+
+- Committed + pushed the branch (3 commits above).
+- **Phase C core, all on the branch, all `bash -n` clean:**
+  - `daemon.sh` (new) — the loop: renew lease → heartbeat (local file + S3
+    object + best-effort CloudWatch) → poll `/research-vm/daemon-control`
+    (`run` | `pause`) → one `RVM_NO_TERMINATE=1 wrapper.sh` cycle → sleep
+    `RVM_DAEMON_POLL_SECONDS` → repeat.
+  - `systemd/rvm-daemon.service` (new) — `Restart=always`, `User=ubuntu`.
+    `systemd-analyze verify` passes (bar a path check that only holds on a real
+    AMI at `/opt/rvm/infra`).
+  - `bootstrap.sh` — `daemon` role: cap = `RVM_MAX_LIFETIME_HOURS` ceiling
+    (never renewed), then install + `systemctl enable --now rvm-daemon`. Idle
+    CPU alarm block deleted (B3). `wrapper.sh` — matching idle-alarm delete
+    removed.
+  - `bin/rvm` — `rvm stop|start <owner/repo>`: find the orchestrator/daemon box
+    by tag, `aws ec2 stop/start-instances`.
+
+## New finding this session
+
+**The box PAT cannot open PRs** (`pull_requests: write` missing). This blocks
+`gh pr create` *and* the daemon's designed "open a PR" step. Needs the user to
+add `Pull requests: write` to `/research-vm/github-pat`'s fine-grained scopes.
+Until then the daemon can only push branches, and Phase E's merge-gate design
+is on hold.
 
 ## To do — in rough priority order
 
-1. **Commit + push** this session's work on a branch (doc fixes + spot-cap fixes),
-   open a PR. Nothing is safe until this happens.
-2. **Phase C code** (`ROADMAP.md` §3):
-   - `daemon.sh` — the maintenance loop (pick one unit of work: agent-labelled
-     issue → `PROJECT.md` §10 → `backlog/TASKS.md`; fresh bounded `claude`
-     session; open a PR; heartbeat to an S3 object + `rvm/heartbeat_age_seconds`
-     CloudWatch metric; sleep; repeat).
-   - `rvm-daemon.service` — systemd, `Restart=always`, per-iteration wall-clock +
-     max-turns bound.
-   - `bootstrap.sh` — remove the `research-vm-idle-*` CloudWatch alarm block (B3);
-     keep the hard cap only as a wedged-loop backstop; add a `daemon` role.
-   - `rvm stop <project>` / `rvm start <project>` = `aws ec2 stop/start-instances`
-     on the tagged orchestrator (no ASG).
-3. **Prove the worker cap fix** — `rvm launch <project> --role worker --worker-id 0`
-   against a repo with a trivial `RVM_WORKER_CMD`; read the boot receipt; confirm
-   it self-terminates at the 2h cap. (CLAUDE.md rule 5: unproven until this.)
-4. **Cost backstop** (user, AWS console, ~3 min): account-wide AWS Budget, 80%
-   actual / 100% forecast → SNS email. No tags needed, immediate.
-5. **B4** — handle the spot interruption notice
-   (`http://169.254.169.254/latest/meta-data/spot/instance-action`): force a
-   flush + push before the ~2-min reclaim. Lower priority if projects sync
-   incrementally.
-6. **Run `shellcheck`** on `bootstrap.sh` / `worker.sh` / `bin/rvm` / `lib/common.sh`
-   — not installed on this box; do it on the laptop.
+1. **Open the PR** for `spot-worker-cap-fix` (user; link above). Add
+   `Pull requests: write` to the PAT while there.
+2. **Prove Phase C + the worker cap fix with real launches:**
+   - `rvm launch <repo> --role worker --worker-id 0` against a repo with a
+     trivial `RVM_WORKER_CMD`; read the receipt; confirm it self-terminates at
+     the 2h cap.
+   - `rvm launch <repo> --role daemon`; confirm `rvm-daemon.service` is active,
+     the loop logs a cycle, a heartbeat object appears under
+     `s3://…/heartbeat/<project>/latest`, and `rvm stop <repo>` stops the box.
+   - CLAUDE.md rule 5: all of Phase C is "unproven" until these.
+3. **Cost backstop** (user, AWS console, ~3 min): account-wide AWS Budget, 80%
+   actual / 100% forecast → SNS email. No tags needed.
+4. **Stalled-loop alarm** (console): CloudWatch alarm on `rvm/heartbeat_age_seconds`
+   (namespace `rvm`, dimension `project`), `treat-missing-data=breaching`, → SNS.
+   Only useful once (2) shows the metric is actually being published (role may
+   lack `cloudwatch:PutMetricData` — the put is best-effort).
+5. **B4** — spot interruption notice handler
+   (`http://169.254.169.254/latest/meta-data/spot/instance-action`): flush +
+   push before the ~2-min reclaim. Lower priority if projects sync incrementally.
+6. **Run `shellcheck`** on all shell scripts — not installed on this box.
 7. **Retire `/research-vm/github-deploy-key`** (user): `aws ssm delete-parameter
    --name /research-vm/github-deploy-key`.
-8. **Clean the stale user-data field on `small_t4g_template` v11** (low priority;
-   `rvm launch` overrides it, and with ASG gone nothing runs it raw).
+8. **Clean the stale user-data on `small_t4g_template` v11** (low priority).
+
+## Not yet done in Phase C (needs decisions / the PAT fix)
+
+- The daemon still runs `wrapper.sh` as-is, which pushes to the working branch
+  and expects CI green. The "agent opens a PR, never pushes `main`, human
+  merges" model (ROADMAP §7) is not wired — it needs the PAT `Pull requests`
+  scope and confirmation of the merge gate.
+- Work-source priority (agent-labelled issues → `PROJECT.md` §10 →
+  `backlog/TASKS.md`) is not encoded anywhere yet — it belongs in the prompt
+  the daemon feeds `claude`. `templates/prompt.md` is the place.
 
 ## Open decisions (need the user)
 
