@@ -1,2 +1,11 @@
 *.pyc
 __pycache__/
+
+# Terraform
+infra/tf/.terraform/
+infra/tf/generated.tf
+*.tfplan
+crash.log
+crash.*.log
+# keep: .terraform.lock.hcl (provider pins, commit it)
+# state is remote (S3); no local *.tfstate expected

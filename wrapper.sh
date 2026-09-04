@@ -104,12 +104,6 @@ fi
 # --- 5. back up anything the terminate would destroy ---
 "${RVM_INFRA_DIR}/bin/rvm" backup || rvm_log "backup failed (non-fatal)"
 
-# --- 6. drop this instance's own idle alarm before the instance is gone ---
-if [ "${RVM_NO_TERMINATE:-0}" != "1" ]; then
-  aws cloudwatch delete-alarms --region "${RVM_REGION}" \
-    --alarm-names "research-vm-idle-${INSTANCE_ID}" 2>/dev/null || true
-fi
-
 # Under the daemon the box outlives the row: one work cycle ends, the next
 # begins with a fresh Claude Code conversation on the same instance. The
 # thing that needed recycling was the agent's context, not the machine.

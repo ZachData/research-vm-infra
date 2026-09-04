@@ -1,0 +1,17 @@
+[Unit]
+Description=research-vm maintenance loop (one project per box)
+After=network-online.target
+Wants=network-online.target
+# Never give up: a transient at boot must not permanently kill the loop.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=ubuntu
+Environment=RVM_INFRA_DIR=/opt/rvm/infra
+ExecStart=/opt/rvm/infra/daemon.sh
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target

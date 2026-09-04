@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 # rvm — one CLI for the whole fleet.
 #
-#   rvm launch <owner/repo> [--role orchestrator|worker] [--worker-id N]
+#   rvm launch <owner/repo> [--role orchestrator|worker|daemon] [--worker-id N]
 #                           [--branch B] [--type t4g.small] [--autorun]
-#   rvm new <owner/repo>        scaffold infra/rvm.env + infra/prompt.md in a repo
+#   rvm new <owner/repo>        scaffold infra/ config in a repo
 #   rvm env <status|build|publish>
 #   rvm cache <pull|push> <name> <path>
-#   rvm backup                  push transcripts + results to S3 before terminate
+#   rvm stop|start <owner/repo> deliberate box on/off (no ASG; user-driven)
+#   rvm backup                  push transcripts + memory to S3
 #   rvm restore-transcripts <project>
 #   rvm doctor                  pre-flight: creds, bucket, PAT, repo, env, disk
-#   rvm ps                      running fleet instances
+#   rvm ps                      fleet instances
 set -euo pipefail
 RVM_INFRA_DIR="${RVM_INFRA_DIR:-$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)}"
 # shellcheck source=../lib/common.sh
@@ -17,7 +18,7 @@ RVM_INFRA_DIR="${RVM_INFRA_DIR:-$(cd "$(dirname "$(readlink -f "$0")")/.." && pw
 # shellcheck source=../lib/envcache.sh
 . "${RVM_INFRA_DIR}/lib/envcache.sh"
 
-usage() { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-1}"; }
+usage() { sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-1}"; }
 
 cmd_launch() {
   local slug role=orchestrator wid="" branch="" itype="" autorun=0 quiet=0 tmpl ud out
@@ -37,7 +38,15 @@ cmd_launch() {
   branch="${branch:-${RVM_BRANCH}}"
   itype="${itype:-${RVM_INSTANCE_TYPE}}"
   local template="${RVM_ORCH_TEMPLATE}"
-  [ "${role}" = worker ] && template="${RVM_WORKER_TEMPLATE}"
+  # Workers are spot-only. The worker template's default version already carries
+  # this, but assert it on the command too so a template default that ever
+  # regresses to on-demand cannot silently produce one. The IAM policy is the
+  # real gate (RunInstances is denied for anything but spot-from-this-template).
+  local market=()
+  if [ "${role}" = worker ]; then
+    template="${RVM_WORKER_TEMPLATE}"
+    market=(--instance-market-options 'MarketType=spot,SpotOptions={SpotInstanceType=one-time,InstanceInterruptionBehavior=terminate}')
+  fi
 
   ud="$(mktemp /tmp/rvm-ud-XXXX.sh)"
   sed -e "s|__PROJECT__|${slug}|g" -e "s|__ROLE__|${role}|g" \
@@ -49,6 +58,7 @@ cmd_launch() {
   out="$(aws ec2 run-instances --region "${RVM_REGION}" \
     --launch-template "LaunchTemplateName=${template}" \
     --instance-type "${itype}" \
+    ${market[@]+"${market[@]}"} \
     --user-data "file://${ud}" \
     --tag-specifications \
       "ResourceType=instance,Tags=[{Key=Project,Value=research-vm},{Key=RvmProject,Value=${RVM_PROJECT}},{Key=Role,Value=${role}},{Key=WorkerId,Value=${wid:-none}}]" \
@@ -155,6 +165,34 @@ cmd_ps() {
     --output table
 }
 
+# The orchestrator/daemon box is cattle in theory but there is no ASG: the
+# user stops it when it is not needed (overnight) and starts it again. These
+# find the box by tag so no instance id has to be remembered.
+_rvm_box_id() {
+  local proj="$1" states="$2"
+  aws ec2 describe-instances --region "${RVM_REGION}" \
+    --filters "Name=tag:RvmProject,Values=${proj}" \
+              "Name=tag:Role,Values=orchestrator,daemon" \
+              "Name=instance-state-name,Values=${states}" \
+    --query 'Reservations[].Instances[].InstanceId' --output text
+}
+cmd_stop() {
+  local proj iid
+  proj="$(rvm_repo_name "$(rvm_repo_slug "${1:?usage: rvm stop <owner/repo>}")")"
+  iid="$(_rvm_box_id "${proj}" 'running,pending')"
+  [ -n "${iid}" ] || rvm_die "no running orchestrator/daemon tagged RvmProject=${proj}"
+  aws ec2 stop-instances --region "${RVM_REGION}" --instance-ids ${iid} \
+    --query 'StoppingInstances[].{id:InstanceId,to:CurrentState.Name}' --output text
+}
+cmd_start() {
+  local proj iid
+  proj="$(rvm_repo_name "$(rvm_repo_slug "${1:?usage: rvm start <owner/repo>}")")"
+  iid="$(_rvm_box_id "${proj}" 'stopped,stopping')"
+  [ -n "${iid}" ] || rvm_die "no stopped orchestrator/daemon tagged RvmProject=${proj}"
+  aws ec2 start-instances --region "${RVM_REGION}" --instance-ids ${iid} \
+    --query 'StartingInstances[].{id:InstanceId,to:CurrentState.Name}' --output text
+}
+
 # Pre-flight. Cheap to run, and every one of these has cost a real session
 # when it was wrong: a run that dies three hours in on a missing checkpoint
 # or an expired token is the whole session.
@@ -194,6 +232,8 @@ case "${1:-}" in
   backup) shift; cmd_backup "$@" ;;
   restore-transcripts) shift; cmd_restore_transcripts "$@" ;;
   ps)     shift; cmd_ps "$@" ;;
+  stop)   shift; cmd_stop "$@" ;;
+  start)  shift; cmd_start "$@" ;;
   doctor) shift; cmd_doctor "$@" ;;
   ""|-h|--help) usage 0 ;;
   *) usage 1 ;;

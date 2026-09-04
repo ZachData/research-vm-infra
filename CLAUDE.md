@@ -8,6 +8,8 @@ The boot path and control plane for a fleet of ephemeral EC2 research instances.
 
 Everything here runs on a machine nobody is watching, usually as root, usually once. That single fact sets every rule below.
 
+Running AWS commands is this repo's job. Launching, stopping and terminating instances tagged `Project=research-vm`, reading their tags, putting CloudWatch metrics, and writing to the shared bucket are normal operation — the orchestrator/daemon path cannot spawn workers or emit a heartbeat without them. The prohibitions in "Do not" below are the specific exceptions, not a blanket "no AWS".
+
 ## Layout
 
 ```
@@ -68,7 +70,7 @@ Only the last one is evidence. Budget for it: a boot is minutes and cents, and i
 - Do not delete objects from the bucket by hand. Use a lifecycle rule.
 - Do not add a second source of truth for the boot path. It lives in git, is fetched at boot, and that is the whole design.
 - Do not bake a repo, a venv, an `at` job, or a credential into the image. The first two are stale the moment they exist; the third stops every future instance seconds after boot; the fourth is a leak.
-- Do not touch AWS resources outside `Project=research-vm`, and do not create or modify IAM roles or policies.
+- Do not touch AWS resources **not** tagged `Project=research-vm`. Do not create or modify IAM roles or policies. Do not call `ec2:CreateImage`. Do not create or repoint launch-template versions. Everything else in EC2/CloudWatch/S3 scoped to `Project=research-vm` is fair game — that is how workers get launched.
 - Do not reintroduce the per-repo deploy key. It is what made the fleet single-project.
 
 ## When finishing
