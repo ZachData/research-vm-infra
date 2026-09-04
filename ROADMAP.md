@@ -70,7 +70,7 @@ removed on 2026-09-03 and are not coming back.
 | Credentials | Split PAT: control-plane (Administration:write, my laptop) vs box (Contents+PR only) | ✗ | Deferred 2026-09-03. `/research-vm/github-pat` rescoped to **all-repositories** (read/write, administration, code, workflows) — G0 unblocked. Split is defense-in-depth; not needed while repo creation is manual and the box only pushes branches. Accepted: box token is all-repos + administration |
 | Credentials | Harden SSM param: customer-managed KMS key, IAM scoped to one ARN, CloudTrail data events | ○ | |
 | IaC | Terraform for the substrate | ✗ | Dropped 2026-09-03 (§7). Scope-creep / privilege risk: the orchestrator can push to this repo, so TF config or state here = the orchestrator editing its own permissions. Substrate stays console-managed by the user. `infra/tf/` to be removed or moved to a repo the fleet never clones |
-| IaC | `infra/tf/` scaffold + `project-orchestrator` module | ✗ | Parked with the Terraform decision. Kept in git history; not wired to anything |
+| IaC | `infra/tf/` scaffold + `project-orchestrator` module | ✗ | Deleted 2026-09-04 (was untracked; never shipped to any instance). Recoverable from git history if Terraform ever returns |
 | Orchestrator | Generic launch template reads its project at runtime (tag/SSM), not via `sed` | ✗ | Was only needed for the ASG path. `rvm launch` does the `sed` substitution and that is fine for a hand-launched box |
 | Orchestrator | `bootstrap.sh`: replace 4h cap + idle-stop with daemon hand-off | ◐ | Written 2026-09-03 on branch `spot-worker-cap-fix`, **unproven**. `daemon` role: ceiling = `RVM_MAX_LIFETIME_HOURS`, then `systemctl enable --now rvm-daemon`. Idle CPU alarm deleted from `bootstrap.sh` + `wrapper.sh`. Worker cap does `shutdown`→terminate, default 2h |
 | Orchestrator | `daemon.sh` + `rvm-daemon.service` | ◐ | Written 2026-09-03, unproven. Loop: renew lease → heartbeat (file + S3 + best-effort CloudWatch) → poll `/research-vm/daemon-control` → one `RVM_NO_TERMINATE=1 wrapper.sh` cycle → sleep. `rvm stop\|start <repo>` added to the CLI |
@@ -83,6 +83,8 @@ removed on 2026-09-03 and are not coming back.
 | Cleanup | Reconcile `small_t4g_template` user-data with `boot/user-data.sh.tmpl` | ○ | Live template v11 is the legacy gh-only bootstrap, not the generic path — see §6 |
 | Cleanup | Retire `/research-vm/github-deploy-key` | ○ | PROJECT.md §10 says deploy keys are gone; param may still exist |
 | Cleanup | Tag or terminate the 2 stopped untagged `t4g.small` instances | ○ | `i-00e5e4b2964a3acc9`, `i-089f06ca9e53e701c` — no `Name`/`RvmProject` |
+| Cleanup | Reconcile CLAUDE.md/HANDOFF.md's "role CAN `ec2:Describe*`" claim with reality | ○ | Found 2026-09-04: `ec2:DescribeImages`, `ec2:GetConsoleOutput`, `ec2:DescribeSpotInstanceRequests`, `ec2:DescribeTags` are all denied to `research-vm-ssm-role`. The last three are read-only diagnostics with no cost/write risk — worth the user granting them so a bad boot is debuggable from in-fleet, since a box has no other way to see its own console output right now |
+| Verification | Boot-receipt mechanism (`C4`) has never actually been observed in S3 | ○ | Found 2026-09-04: `s3://…/boot-receipts/` holds nothing but an old `_selftest/` prefix, across every launch this repo's docs describe as "verified end to end." `PROJECT.md`'s "Boot receipts ●" row says "verified locally against a synthetic invocation" — that phrasing was the tell. Needs a real boot that actually produces a receipt before C4 is marked done anywhere |
 
 ---
 
@@ -144,27 +146,45 @@ data caches, back up transcripts, read heartbeats.
 
 - ~~ASG user-data delivery~~ — moot, ASG dropped. `rvm launch` does the `sed`.
 - ~~Does Terraform own the S3 bucket~~ — moot, Terraform dropped.
-- **Merge gate.** Agent opens PRs only. Who merges — me, an approving
-  reviewer-agent, or both required?
-- **Fresh session vs `--continue` per loop iteration.** Leaning fresh: it forces
-  `PROJECT.md` + memory to be sufficient context and sidesteps months of drift.
-- **Work source priority.** Proposed: agent-labelled GitHub issues → `PROJECT.md`
-  §10 open questions → `backlog/TASKS.md`. Confirm.
-- **One project per instance, or several per box?** `lib/common.sh` still has
-  multi-project-per-box scaffolding (venv-per-project root). Leaning one project
-  per box — pick one and delete the other path.
+- ~~Merge gate~~ — **RESOLVED 2026-09-04.** Human merges; a reviewer-agent pass
+  is advisory only. Agent never pushes `main`. Encoded in `templates/prompt.md`.
+- ~~Fresh session vs `--continue`~~ — **RESOLVED 2026-09-04, confirms existing
+  behavior.** Fresh: `wrapper.sh` already runs one `claude "$(cat prompt)"`
+  invocation per cycle with no `--continue`, so this was already true in code;
+  no change needed, just confirming it's the intended design and not an
+  oversight.
+- ~~Work source priority~~ — **RESOLVED 2026-09-04.** Agent-labelled GitHub
+  issues → `PROJECT.md` §10 open questions → `backlog/TASKS.md` → status board.
+  Wired into `templates/prompt.md`.
+- ~~One project per instance, or several per box?~~ — **RESOLVED 2026-09-04.**
+  One project per box. The multi-project venv-per-project-root scaffolding in
+  `lib/common.sh` (`RVM_VENV_ROOT`, `RVM_VENV_OVERRIDE`) is deleted; `RVM_VENV`
+  is a single fixed path again, matching `PROJECT.md` §3's non-relocatability
+  note.
 - **Stalled-loop threshold.** Proposed: alert if no heartbeat for 3h. The loop
-  sleeps ~1h when idle, so 3h = two missed cycles.
-- **What to do with `infra/tf/`** now Terraform is dropped: delete it from this
-  repo, or move it to a separate private repo the fleet never clones? Leaning
-  delete — it can come back from git history. If it ever returns, its state must
-  live in a bucket the instance roles cannot read (they can currently write
-  `s3://research-vm-shared-.../terraform/`).
-- **Daemon defaults — proposed 2026-09-03, awaiting confirmation:** one project
-  per box (delete the multi-project venv-root path in `lib/common.sh`); a fresh
-  bounded `claude` session per loop iteration (not `--continue`); work priority
-  agent-labelled issues → `PROJECT.md` §10 → `backlog/TASKS.md`; merge gate =
-  human (me), reviewer-agent pass advisory only, agent never pushes `main`.
+  sleeps ~1h when idle, so 3h = two missed cycles. Still open.
+- ~~What to do with `infra/tf/`~~ — **RESOLVED 2026-09-04: deleted.** It was
+  untracked, so this was working-tree cleanup only, not a commit; recoverable
+  from git history (the last commit that had it tracked, if any) if Terraform
+  ever comes back.
+- ~~Daemon defaults~~ — **RESOLVED 2026-09-04, adopted as proposed:** one
+  project per box; a fresh bounded `claude` session per loop iteration; work
+  priority agent-labelled issues → `PROJECT.md` §10 → `backlog/TASKS.md`;
+  merge gate = human, reviewer-agent pass advisory only, agent never pushes
+  `main`.
+- **NEW 2026-09-04 — daemon-role boxes cannot be launched from inside the
+  fleet.** `rvm launch --role daemon` (on-demand, orchestrator template)
+  requires `iam:PassRole` on `research-vm-ssm-role`; an instance already
+  running under that role is denied passing it to launch another instance
+  carrying it. Confirmed by a real `RunInstances` denial, not a guess. Workers
+  (spot, worker template, no `PassRole` needed) are unaffected — a daemon
+  running on an in-fleet box can still launch worker fan-out. A daemon or
+  orchestrator box itself must be launched by the user's own credentials.
+  Worth deciding whether this is the permanent model (a human always launches
+  the first box per project) or whether a narrower `iam:PassRole` grant
+  scoped to exactly this one role/template pairing is worth adding — that
+  would be a deliberate IAM widening and belongs in this decisions log if
+  taken.
 
 ---
 
@@ -206,6 +226,11 @@ data caches, back up transcripts, read heartbeats.
 | 2026-09-03 | Repo creation stays manual | Not enough new project ideas to justify automating it. Some steps are allowed to be manual |
 | 2026-09-03 | Projects start from a separate minimal `research-project-template`, not generated from `research-vm-infra` | Generating from this repo copies the infra scripts into every project and re-breaks the separation in PROJECT.md §9 |
 | 2026-09-03 | Reviewer-agent pass on every PR and on `PROJECT.md` hypothesis formation; agent opens PRs only, never pushes `main` | The main risk of an unattended loop is days of unreviewed bad commits |
+| 2026-09-04 | Four daemon defaults adopted as proposed: one project per box, fresh `claude` session per iteration, work priority (issues → `PROJECT.md` §10 → backlog), merge gate = human only | Confirmed by the user; unblocks deleting the multi-project code path and wiring work priority into `templates/prompt.md` |
+| 2026-09-04 | `lib/common.sh`'s multi-project venv-per-project-root scaffolding (`RVM_VENV_ROOT`, `RVM_VENV_OVERRIDE`) deleted; `RVM_VENV` is a single fixed path again | Direct consequence of one-project-per-box. Matches `PROJECT.md` §3's non-relocatability note, which the multi-project scaffolding had silently drifted away from |
+| 2026-09-04 | `infra/tf/` deleted from the working tree | It was untracked (never shipped to any instance either way); confirmed by the user, recoverable from git history if Terraform ever returns |
+| 2026-09-04 | `templates/CLAUDE.md` genericized in place (dropped the closed-form-oracle / discrimination-test / `METRIC_VERSION`-hash specifics that were Lora's, kept the general TDD/provenance/hygiene discipline); `templates/PROJECT.md` left as-is (already a generic placeholder scaffold) | `bin/rvm new` still scaffolds from this repo's `templates/` today, not from a separate template repo, so the templates it actually hands out needed to not be Lora-shaped. The separate `research-project-template` repo (2026-09-03 row above) is still the longer-term plan; this is the interim fix for what `rvm new` does right now |
+| 2026-09-04 | `bootstrap.sh`'s `apt-get install -y at` made `DEBIAN_FRONTEND=noninteractive` with a 120s `timeout`, committed and pushed to `main` | A real worker launch (`i-0489b42000a50f0d2`) ran ~3h, produced no boot receipt and no pushed work, then was reclaimed — consistent with hanging on an interactive debconf prompt before the hard cap or receipt trap exist. This session independently reproduced the same prompt installing `shellcheck` by hand on the same image lineage. Re-launch (`i-08239a05869300769`) is validating the fix |
 
 ---
 

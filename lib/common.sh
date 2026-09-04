@@ -10,16 +10,13 @@ RVM_INFRA_DIR="${RVM_INFRA_DIR:-/opt/rvm/infra}"
 RVM_PAT_PARAM="${RVM_PAT_PARAM:-/research-vm/github-pat}"
 RVM_TARGET_USER="${RVM_TARGET_USER:-ubuntu}"
 RVM_TARGET_HOME="${RVM_TARGET_HOME:-/home/${RVM_TARGET_USER}}"
-# One venv per project, under a common root. The daemon serves several
-# projects from one long-lived box, and a single shared venv path meant
-# every project switch evicted the previous project's environment. A venv
-# is not relocatable, so the path must be deterministic per project rather
-# than merely unique: ${RVM_VENV_ROOT}/<project> is the same path on every
-# machine, which keeps the S3 tarballs valid. ~1.5 GB each against 50 GB
-# free is ~30 projects.
-RVM_VENV_ROOT="${RVM_VENV_ROOT:-${RVM_TARGET_HOME}/venvs}"
-RVM_VENV_OVERRIDE="${RVM_VENV:-}"
-RVM_VENV="${RVM_VENV:-${RVM_VENV_ROOT}/default}"
+# One project per box (ROADMAP.md §5/§7, confirmed 2026-09-04): a daemon
+# maintains a single project for its whole life, never several, so the venv
+# path is fixed rather than keyed per project. A venv's scripts carry
+# absolute shebangs, so a tarball is only valid extracted to the path it was
+# built at — fixed and shared is what keeps the S3 cache tarballs valid
+# across machines.
+RVM_VENV="${RVM_VENV:-${RVM_TARGET_HOME}/venv}"
 
 # Daemon state. Kept on local disk, not in S3: the box outlives every
 # individual run now, so S3 is the backup channel rather than the hot path.
@@ -149,7 +146,6 @@ rvm_load_project() {
   RVM_PROMPT_FILE="infra/prompt.md"
   RVM_CACHE_PATHS=""
   RVM_CI_GATE=1
-  RVM_VENV="${RVM_VENV_OVERRIDE:-${RVM_VENV_ROOT}/${name}}"
 
   [ -f "${RVM_INFRA_DIR}/projects/${name}.env" ] && . "${RVM_INFRA_DIR}/projects/${name}.env"
   [ -f "${repo_dir}/infra/rvm.env" ] && . "${repo_dir}/infra/rvm.env"
