@@ -26,7 +26,11 @@ rvm_log "bootstrap: project=${PROJECT_ARG} role=${ROLE} instance=${INSTANCE_ID}"
 # stop it. The default hard-cap hours are used here because the project's
 # own config has not been read yet — a cap that is slightly wrong beats a
 # cap that never gets set.
-apt-get install -y at >/dev/null 2>&1 || true
+# noninteractive + timeout: this runs with no tty, before the cap below
+# exists to catch it. An interactive debconf prompt (e.g. a pending kernel
+# upgrade) would otherwise hang here forever with nothing scheduled to stop
+# the instance — the one place rule 1 has no later safety net.
+DEBIAN_FRONTEND=noninteractive timeout 120 apt-get install -y at >/dev/null 2>&1 || true
 systemctl enable --now atd >/dev/null 2>&1 || true
 # A one-time spot instance (every worker) cannot be stopped, only terminated,
 # so its cap does an OS shutdown — the worker template's

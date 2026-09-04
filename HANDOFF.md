@@ -88,6 +88,96 @@ is on hold.
    --name /research-vm/github-deploy-key`.
 8. **Clean the stale user-data on `small_t4g_template` v11** (low priority).
 
+## BLOCKER — live IAM regression, found 2026-09-03 late session
+
+`ec2:RunInstances` on `research-vm-ssm-role` now fails for **every** combination
+tried, including the exact spot/`t4g.small`/worker-template call that launched
+successfully earlier this session. The failure differs by case:
+
+- Spot `t4g.small` from `research-vm-worker-template`, no overrides — denied on
+  `resource: image/ami-0d469967250a418da` (a NEW failure mode; this exact call
+  worked a few hours earlier in this same session).
+- `g5g.xlarge` (GPU, spot-inherited) — denied on `resource: instance/*`, same
+  pattern as any wrong-instance-type attempt.
+- On-demand from the orchestrator template — still denied on `iam:PassRole`,
+  unchanged.
+- `ec2:DescribeImages` — now also denied (wasn't earlier).
+
+Nobody on this side touched IAM (no `iam:*` from this box, confirmed twice).
+Something changed the `research-vm-ssm-role` policy between the earlier
+successful real launch and now — check whether the `RunInstances` statement's
+`Resource` list still covers `image/ami-0d469967250a418da`.
+
+**On-demand is still correctly blocked wherever reachable** — that part holds.
+GPU access is unconfirmed either way until the spot path works again, since the
+one call that's supposed to succeed is currently denied too.
+
+**Do not attempt real launches until this is confirmed fixed.** The throwaway
+Lora branch `infra-smoketest` (trivial `RVM_WORKER_CMD`, not merged) is ready
+for the worker-cap proof the moment it is.
+
+**RESOLVED 2026-09-04.** Re-checked with `aws ec2 run-instances --dry-run`
+from this same role: spot `t4g.small` from `research-vm-worker-template`
+(no overrides) now returns `DryRunOperation` (would succeed). On-demand from
+the orchestrator template is still correctly denied on `iam:PassRole`;
+`g5g.xlarge` is still correctly denied (wrong instance type). Whatever
+transient policy state caused the regression is gone — real launches are
+unblocked again. `ec2:DescribeImages` is still denied (contradicts the
+"role CAN `ec2:Describe*`" note below); low priority since the AMI id is
+hardcoded in the launch template, not looked up at boot.
+
+**Real proof launches, 2026-09-04:**
+- `rvm launch ZachData/Lora_inductionhead --role worker --worker-id 0 --branch
+  infra-smoketest` launched: `i-0489b42000a50f0d2`, confirmed spot
+  (`InstanceLifecycle=spot`), `t4g.small`, running at launch (14:39:22 UTC).
+  **Outcome is inconclusive, not a pass — do not mark C4/C5 proven from this
+  run:**
+  - It ran for ~3h00m then began terminating (`shutting-down` at 17:39 UTC),
+    which lines up suspiciously well with this project's
+    `RVM_WORKER_HOURS=3` — looks like its own hard cap fired, not (only) a
+    random spot reclaim, though the state-reason (`Server.
+    SpotInstanceTermination`) doesn't cleanly confirm which.
+  - **No boot receipt landed in S3.** `s3://…/boot-receipts/` has nothing
+    but an old `_selftest/` prefix — checked both
+    `boot-receipts/Lora_inductionhead/` specifically and the whole prefix.
+    This isn't unique to this run: across everything this repo's docs
+    describe as "verified end to end" (the 2026-09-03 spot test included),
+    **no boot receipt has ever actually landed in S3.** PROJECT.md's "Boot
+    receipts ●" row says "verified locally against a synthetic invocation" —
+    that phrasing is the tell; it has never been verified against a real
+    boot. Treat C4 as unverified, not done.
+  - **No commit landed** on `infra-smoketest` (`origin/infra-smoketest` is
+    still at `6eec162`, the pre-existing throwaway commit) — `worker.sh`
+    never reached its push step, or the push silently failed.
+  - Cannot diagnose further from any box in the fleet: `research-vm-ssm-role`
+    denies `ec2:GetConsoleOutput`, `ec2:DescribeSpotInstanceRequests`, and
+    `ec2:DescribeTags` — all read-only, all things CLAUDE.md/this file's
+    "Environment notes" claim the role *can* do (`ec2:Describe*`). That
+    claim is wrong; the actual Describe allowlist is narrower. Worth asking
+    the user to grant these three (read-only, no write/cost risk) so a
+    future bad boot is debuggable without console access, and worth fixing
+    the docs either way.
+  - **Needs the user to pull the EC2 console/system log for
+    `i-0489b42000a50f0d2` from the AWS console** (this role can't) to see
+    what bootstrap.sh was actually doing for 3 hours. Prime suspect:
+    something in the boot path hangs on an interactive prompt when run with
+    no tty — this session independently hit exactly that failure mode
+    installing `shellcheck` via plain `apt-get install -y` (a pending-kernel
+    -upgrade whiptail prompt, `Failed to open terminal`); `bootstrap.sh`'s
+    own `apt-get install -y at ...` and `bake-prep.sh`'s package installs
+    are not obviously guarded with `DEBIAN_FRONTEND=noninteractive` — check
+    that first.
+- `rvm launch ZachData/Lora_inductionhead --role daemon` **failed**, same
+  `iam:PassRole` denial as on-demand launches generally. This is structural,
+  not a bug: the daemon/orchestrator template needs `iam:PassRole` on
+  `research-vm-ssm-role`, and an instance running under that role cannot pass
+  it to launch another instance carrying the same role. **A daemon-role box
+  can only be launched from the user's own credentials (laptop/console),
+  never from a box already in the fleet.** Update `ROADMAP.md`/`PROJECT.md`
+  if this constraint isn't already written down there — it means Phase C's
+  daemon proof needs the user to run the launch, not an agent on any
+  in-fleet box.
+
 ## Not yet done in Phase C (needs decisions / the PAT fix)
 
 - The daemon still runs `wrapper.sh` as-is, which pushes to the working branch
