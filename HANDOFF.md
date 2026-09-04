@@ -167,6 +167,29 @@ hardcoded in the launch template, not looked up at boot.
     own `apt-get install -y at ...` and `bake-prep.sh`'s package installs
     are not obviously guarded with `DEBIAN_FRONTEND=noninteractive` — check
     that first.
+
+**Fix applied, re-tested, STILL FAILING — 2026-09-04.** Applied
+`DEBIAN_FRONTEND=noninteractive` + `timeout 120` to the `at` install
+(commit `c59e001`, pushed to `main` before the retest launched), then
+relaunched: `rvm launch ZachData/Lora_inductionhead --role worker
+--worker-id 1 --branch infra-smoketest` → `i-08239a05869300769`, launched
+2026-09-04T19:01:38Z. **Still running at 19:35:52Z (34 min elapsed, no
+cap fired yet — `RVM_WORKER_HOURS=3`), no boot receipt, no pushed
+commit.** Same symptom as the first failure, so either the apt-get fix
+didn't address the actual cause, or there's a second, different hang
+further into the boot path (worth checking: the `uv` interpreter fetch,
+the `git clone` of the project repo, the env-cache restore/build in
+`lib/envcache.sh`, or `rvm_setup_git_auth`'s `gh auth login`).
+
+**Left running deliberately, not terminated** — this role cannot see
+console output (`ec2:GetConsoleOutput` denied) and has no other way to
+diagnose it. **Needs the user to check the EC2 console system log for
+`i-08239a05869300769` directly, or SSM Session Manager / SSH in if
+reachable, before it either finishes or hits its 3h cap (~22:01 UTC).**
+Do not relaunch a third time blind — get real signal from this one first.
+Two consecutive real launches with the exact same "no receipt, no push,
+runs long past when a trivial cell should finish" symptom means the boot
+path has a real, unidentified defect, not bad luck twice.
 - `rvm launch ZachData/Lora_inductionhead --role daemon` **failed**, same
   `iam:PassRole` denial as on-demand launches generally. This is structural,
   not a bug: the daemon/orchestrator template needs `iam:PassRole` on
