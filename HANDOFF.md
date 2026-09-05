@@ -190,6 +190,47 @@ Do not relaunch a third time blind — get real signal from this one first.
 Two consecutive real launches with the exact same "no receipt, no push,
 runs long past when a trivial cell should finish" symptom means the boot
 path has a real, unidentified defect, not bad luck twice.
+
+**Terminated by the user 2026-09-04** without a console check (no AWS
+access available at the time). A likely root cause was found instead by
+reading the code and git history, not by inspecting the box — and it's
+already fixed:
+
+**ROOT CAUSE (confirmed from git history, not just inferred): the env
+cache has been serving a guaranteed miss for every project since
+2026-09-03.** Commit `2c836ae` ("Long-lived daemon box: per-project
+venvs...") changed `RVM_VENV` from a fixed path to
+`${RVM_VENV_ROOT}/<project-name>` so a hypothetical multi-project daemon
+wouldn't evict one project's venv for another's. `rvm_env_hash` includes
+`venv=$(basename "${RVM_VENV}")` — the commit's own message says "the
+venv name joins the cache key," so the author knew this, but the hash's
+`v3` prefix was never bumped even though its *value* now differs for
+every existing project (`venv=Lora_inductionhead` vs. the `venv=venv`
+that the existing cached artifact,
+`envs/aarch64/py3.11/Lora_inductionhead/f65d45e18cec9a44.tar.zst`
+(373 MB, published 2026-09-01), was almost certainly built under). This
+is CLAUDE.md rule 4's exact failure mode: "the cache will serve a stale
+environment that looks completely fine" — except here it's worse than
+stale, it's *unreachable*, so every boot since silently fell back to a
+full `pip install -e '.[dev]'` build of Lora's complete dependency set
+instead of a ~13s restore. That set has grown across 91 commits since
+the ~6-minute build figure in PROJECT.md §4 was measured; a much slower
+real build time (tens of minutes, possibly worse under pip's resolver on
+a large scientific-Python dependency graph) is a very plausible
+explanation for both worker "hangs" being genuinely slow builds, not
+stuck processes.
+
+**Already fixed, already pushed, not yet validated by a real launch:**
+commit `d23fb15` (this session, motivated independently by the
+one-project-per-box decision) reverted `RVM_VENV` to a single fixed path,
+which restores the *original* hash calculation and should make the
+existing 2026-09-01 cached artifact reachable again — a fast restore
+instead of a slow rebuild. **Next real worker launch against
+`Lora_inductionhead` is the actual test of this theory:** watch for
+`env <hash>: cache hit, restoring …` in the boot log / a receipt landing
+within roughly a minute, not tens of minutes. If it's still slow, this
+theory is wrong or incomplete and the apt-get fix + this fix together
+still don't explain the full picture.
 - `rvm launch ZachData/Lora_inductionhead --role daemon` **failed**, same
   `iam:PassRole` denial as on-demand launches generally. This is structural,
   not a bug: the daemon/orchestrator template needs `iam:PassRole` on
