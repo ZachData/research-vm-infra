@@ -27,9 +27,11 @@ The system is infrastructure, not science, but the discipline is the same: every
 
 Legend: ○ not started · ◐ in progress · ● done · ✗ failed/abandoned
 
-> **Direction note (2026-09-03).** `ROADMAP.md` tracks a shift from ephemeral
+> **Direction note (2026-09-04).** `ROADMAP.md` tracks a shift from ephemeral
 > instances (this board's G0–G3) to one long-lived daemon-orchestrator per
-> project under an ASG of size 1. Where §3's mechanism (idle alarm, terminate
+> project, started/stopped by hand — **no ASG** (dropped 2026-09-03, the same
+> day it was first proposed; it misbehaved once and storage, not compute, is
+> most of the monthly cost). Where §3's mechanism (idle alarm, terminate
 > on green) disagrees with `ROADMAP.md`, the roadmap is the newer decision and
 > wins; settled pieces fold back here once proven by a real launch.
 
@@ -61,15 +63,37 @@ The inversion: **the image holds only what never changes; everything that change
 AMI ──> user-data (project name substituted; everything else fixed)
          └─ clone/reset research-vm-infra
             └─ bootstrap.sh <owner/repo> <role>
-               0.  hard cap (before anything that can fail)
+               0.  hard cap (before anything that can fail; role-specific
+                   command — shutdown for a worker since a one-time spot
+                   instance cannot be stopped, stop-instances otherwise)
                0b. receipt trap
                1.  git auth from SSM
                2.  clone/reset the project repo
                3.  venv: hash → restore, or build → publish
                4.  data caches; 4b. agent memory
                5.  ~/.rvm-current, shell autostart
-               6.  cap reset to the project's value; idle alarm (being retired — ROADMAP)
-               7.  wrapper.sh | worker.sh
+               6.  cap reset to the role's value. No idle-CPU alarm — removed
+                   2026-09-03, it stopped instances that were mid-work
+               7.  hand off, by role:
+                   worker       → worker.sh: one sweep cell, push, shutdown
+                                  (always terminates; never stops)
+                   orchestrator → wrapper.sh: one bounded cycle, terminate on
+                                  green — the original ephemeral model,
+                                  still what `--role orchestrator` does
+                   daemon       → systemd rvm-daemon.service running
+                                  daemon.sh: loop of {renew lease, heartbeat
+                                  to S3 + CloudWatch, poll
+                                  /research-vm/daemon-control, one
+                                  RVM_NO_TERMINATE=1 wrapper.sh cycle, sleep},
+                                  never terminates on green. Written
+                                  2026-09-03 (ROADMAP.md Phase C), code
+                                  reviewed but **UNPROVEN** — no daemon-role
+                                  instance has completed a real boot yet, and
+                                  a daemon can currently only be launched with
+                                  the user's own credentials, never from a
+                                  box already in the fleet (`iam:PassRole`
+                                  denied to an instance's own role). See
+                                  ROADMAP.md/HANDOFF.md for the live status
 ```
 
 **The env-cache key.** `envs/<arch>/py<version>/<project>/<hash>.tar.zst`, where the hash covers, and must cover, everything that can change the resulting `site-packages`:
@@ -106,7 +130,7 @@ Criteria fixed now, before G0 runs. Each is a comparison a machine can evaluate 
 | C2 | A cache hit restores in under 60 s | `restore_seconds ≥ 60` on a cold boot |
 | C3 | A dependency change requires no AMI rebuild | a boot that cannot produce a working env without a new image |
 | C4 | Every boot leaves a receipt, success or failure | any instance that reaches `running` and writes no receipt |
-| C5 | No instance is ever left running without a cap | any instance found running past its cap with no `at` job |
+| C5 | No instance is ever left running without a cap | any instance found running past its cap with no `at` job. For a daemon this is two layers, not one: a never-renewed lifetime ceiling (`RVM_MAX_LIFETIME_HOURS`) plus a lease re-armed each loop iteration (`RVM_LEASE_MINUTES`) that fires if one iteration hangs — falsified the same way, an instance running with neither job scheduled |
 
 C4 and C5 are the ones with teeth. C1–C3 fail visibly; C4 and C5 fail silently, and their failure mode is a bill.
 

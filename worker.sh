@@ -46,6 +46,28 @@ CMD="${CMD//\{worker_id\}/${WORKER_ID}}"
 CMD="${CMD//\{n_workers\}/${N_WORKERS}}"
 rvm_log "cell command: ${CMD}"
 
+# A spot reclaim gives ~2 minutes' notice via IMDS before it takes the
+# volume, which is not enough time for the cell's own end-of-run push to
+# run if it hasn't started yet. Poll for the notice for the lifetime of the
+# cell and push whatever exists the moment it appears, in parallel with
+# whatever the cell is doing.
+watch_spot_interruption() {
+  while true; do
+    if rvm_imds spot/instance-action >/dev/null 2>&1; then
+      rvm_log "spot interruption notice received — pushing whatever exists now"
+      su - "${RVM_TARGET_USER}" -c "cd '${RVM_REPO_DIR}' && git add -A \
+        && (git diff --cached --quiet || git commit -m 'worker ${WORKER_ID}: ${RVM_PROJECT} partial (spot reclaim)') \
+        && git pull --rebase origin '${BRANCH}' && git push origin 'HEAD:${BRANCH}'" \
+        >>/var/log/rvm-boot.log 2>&1 || true
+      "${RVM_INFRA_DIR}/bin/rvm" backup >>/var/log/rvm-boot.log 2>&1 || true
+      break
+    fi
+    sleep 5
+  done
+}
+watch_spot_interruption &
+SPOT_WATCHER_PID=$!
+
 set +e
 su - "${RVM_TARGET_USER}" -c "cd '${RVM_REPO_DIR}' \
   && . '${RVM_VENV}/bin/activate' \
@@ -54,6 +76,7 @@ su - "${RVM_TARGET_USER}" -c "cd '${RVM_REPO_DIR}' \
 CELL_RC=$?
 set -e
 rvm_log "cell exited ${CELL_RC}"
+kill "${SPOT_WATCHER_PID}" 2>/dev/null || true
 
 # Push whatever the cell produced even on failure — a partial result plus a
 # nonzero exit is far more useful than a silently dead instance.

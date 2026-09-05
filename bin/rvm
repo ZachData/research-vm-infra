@@ -163,6 +163,30 @@ cmd_ps() {
               'Name=instance-state-name,Values=pending,running,stopping,stopped' \
     --query 'Reservations[].Instances[].[InstanceId,State.Name,InstanceType,Tags[?Key==`RvmProject`]|[0].Value,Tags[?Key==`Role`]|[0].Value,LaunchTime]' \
     --output table
+
+  # Daemons/orchestrators heartbeat to S3 every RVM_DAEMON_POLL_SECONDS
+  # (daemon.sh); read it back so a stalled loop shows up here without
+  # needing console access to the box.
+  local projects p hb ts status now age
+  projects="$(aws ec2 describe-instances --region "${RVM_REGION}" \
+    --filters 'Name=tag:Project,Values=research-vm' \
+              'Name=tag:Role,Values=orchestrator,daemon' \
+              'Name=instance-state-name,Values=pending,running' \
+    --query 'Reservations[].Instances[].Tags[?Key==`RvmProject`]|[0].Value' \
+    --output text 2>/dev/null | tr '\t' '\n' | { grep -v '^None$' || true; } | sort -u)"
+  [ -z "${projects}" ] && return 0
+  echo
+  printf '%-24s %-10s %-8s %s\n' "PROJECT" "STATUS" "AGE(s)" "LAST HEARTBEAT (UTC)"
+  now="$(date -u +%s)"
+  for p in ${projects}; do
+    hb="$(aws s3 cp "s3://${RVM_BUCKET}/heartbeat/${p}/latest" - \
+          --region "${RVM_REGION}" 2>/dev/null)" \
+      || { printf '%-24s %s\n' "${p}" "no heartbeat"; continue; }
+    ts="$(echo "${hb}" | sed -n 's/^ts=//p')"
+    status="$(echo "${hb}" | sed -n 's/^status=//p')"
+    age="$(( now - $(date -u -d "${ts}" +%s 2>/dev/null || echo "${now}") ))"
+    printf '%-24s %-10s %-8s %s\n' "${p}" "${status:-unknown}" "${age}" "${ts:-unknown}"
+  done
 }
 
 # The orchestrator/daemon box is cattle in theory but there is no ASG: the

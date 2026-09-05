@@ -108,7 +108,7 @@ fi
 rvm_load_project "${PROJECT_ARG}"
 
 # --- 3. python env, from the S3 cache ---
-rvm_env_ensure "${RVM_REPO_DIR}" "$(command -v python3.12 || command -v python3)"
+rvm_env_ensure "${RVM_REPO_DIR}"
 chown -R "${RVM_TARGET_USER}:${RVM_TARGET_USER}" "${RVM_VENV}"
 
 # --- 4. named data caches (model checkpoints, datasets) ---
