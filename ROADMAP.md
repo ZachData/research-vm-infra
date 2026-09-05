@@ -66,7 +66,7 @@ removed on 2026-09-03 and are not coming back.
 |---|---|---|---|
 | Cost safety | Remove auto time-stop + usage-stop from EC2 template user-data | ● | They stopped instances mid-work. Removed from the launch-template user-data field |
 | Cost safety | AWS Budget, SNS alert (no kill) | ○ | Start with an account-wide budget (no tags needed) in the Billing console. Per-project budgets later, once `RvmProject` is an activated cost-allocation tag |
-| Cost safety | Stalled-loop alarm (heartbeat age), notify only | ○ | Depends on the loop emitting an `rvm/heartbeat_age_seconds` metric. Console-created CloudWatch alarm → SNS |
+| Cost safety | Stalled-loop alarm (heartbeat age), notify only | ○ | Metric emission is done (`daemon.sh`'s `heartbeat()` puts `rvm/heartbeat_age_seconds` every iteration). Threshold finalized 2026-09-04 (§5): 3h, `treat-missing-data=breaching`. Only the console-side CloudWatch alarm itself remains — needs the user |
 | Credentials | Split PAT: control-plane (Administration:write, my laptop) vs box (Contents+PR only) | ✗ | Deferred 2026-09-03. `/research-vm/github-pat` rescoped to **all-repositories** (read/write, administration, code, workflows) — G0 unblocked. Split is defense-in-depth; not needed while repo creation is manual and the box only pushes branches. Accepted: box token is all-repos + administration |
 | Credentials | Harden SSM param: customer-managed KMS key, IAM scoped to one ARN, CloudTrail data events | ○ | |
 | IaC | Terraform for the substrate | ✗ | Dropped 2026-09-03 (§7). Scope-creep / privilege risk: the orchestrator can push to this repo, so TF config or state here = the orchestrator editing its own permissions. Substrate stays console-managed by the user. `infra/tf/` to be removed or moved to a repo the fleet never clones |
@@ -162,8 +162,29 @@ data caches, back up transcripts, read heartbeats.
   `lib/common.sh` (`RVM_VENV_ROOT`, `RVM_VENV_OVERRIDE`) is deleted; `RVM_VENV`
   is a single fixed path again, matching `PROJECT.md` §3's non-relocatability
   note.
-- **Stalled-loop threshold.** Proposed: alert if no heartbeat for 3h. The loop
-  sleeps ~1h when idle, so 3h = two missed cycles. Still open.
+- **Stalled-loop threshold — corrected + finalized 2026-09-04.** The "loop
+  sleeps ~1h when idle" premise this was proposed on was wrong: the actual
+  default is `RVM_DAEMON_POLL_SECONDS=300` (5 min), not 1h — checked against
+  `lib/common.sh`. A short threshold tuned to the poll interval would false-
+  alarm on any single long-but-legitimate work cycle, though, since
+  `daemon.sh` only heartbeats at the *start* and *end* of a cycle
+  (`status=working` → `status=idle`/`error`), not during one — a real cycle
+  can legitimately run close to the `RVM_LEASE_MINUTES=90` lease before that
+  layer force-stops it. **Recommendation: alert at no heartbeat for 3h**
+  (double the lease, not "two missed 1h cycles") — long enough that one slow
+  cycle never false-alarms, short enough to catch `rvm-daemon.service` itself
+  being dead (crash-looping faster than it heartbeats, or the unit failing to
+  start) well before it'd otherwise go unnoticed. The metric side is already
+  implemented (`daemon.sh`'s `heartbeat()` puts `rvm/heartbeat_age_seconds`
+  dimensioned by `project`, value `0`, on every iteration — the alarm relies
+  on *time since last datapoint*, not the value, via
+  `treat-missing-data=breaching`); only the console-side CloudWatch alarm
+  itself is still undone. Exact spec: namespace `rvm`, metric
+  `heartbeat_age_seconds`, dimension `project=<name>`, statistic `Maximum`,
+  period `300`, evaluation periods `36` (36×5min=3h), `treat-missing-data
+  breaching`, threshold `>= 0` (any datapoint at all counts as alive; the
+  alarm should really be keyed on absence, which `treat-missing-data` gives
+  you regardless of the threshold value) → SNS.
 - ~~What to do with `infra/tf/`~~ — **RESOLVED 2026-09-04: deleted.** It was
   untracked, so this was working-tree cleanup only, not a commit; recoverable
   from git history (the last commit that had it tracked, if any) if Terraform
